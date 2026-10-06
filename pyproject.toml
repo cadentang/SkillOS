@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "skillos"
+version = "0.1.0"
+description = "Skill OS — 个人 AI Skill 操作系统（CLI / daemon / MCP 三模式同一包）"
+requires-python = ">=3.11"
+readme = "CODEBUDDY.md"
+dependencies = [
+    # 入口 / CLI（02 §9：Python 3.13 + Typer）
+    "typer>=0.12",
+    "rich>=13",
+    # API / 实时（FastAPI + Uvicorn 与 WebSocket 同进程）
+    "fastapi>=0.111",
+    "uvicorn[standard]>=0.30",
+    # ORM / 迁移
+    "sqlalchemy>=2.0",
+    "alembic>=1.13",
+    # MCP（官方 SDK，stdio 传输）
+    "mcp>=1.2",
+    # 数据结构
+    "pydantic>=2.7",
+    # 跨平台文件锁（05 P0-3：禁用 fcntl / msvcrt）
+    "filelock>=3.14",
+    # frontmatter / sidecar 解析
+    "pyyaml>=6.0",
+    # daemon WS 客户端 / 上游 URL 检查
+    "websockets>=12.0",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+skillos = "skillos.cli.main:app"
+
+[tool.setuptools.packages.find]
+include = ["skillos*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

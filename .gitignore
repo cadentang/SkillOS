@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# 本地数据库（表结构以 data/migrations 为准）
+*.sqlite3
+*.db
+
+# Node
+node_modules/
+web/dist/
+web/.vite/
+
+# 本地环境与凭据（NFR-2：token 禁止入项目目录）
+.env
+.env.*
+*.local
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Skill OS 运行时产物
+.skillos/
+sandbox/runtime/
+data/*.sqlite3

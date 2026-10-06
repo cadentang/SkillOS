@@ -1,0 +1,1478 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="Light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Skill OS · Agent 能力的包管理器与分发层</title>
+<style>
+/* ==========================================================================
+   Skill OS — Design Tokens
+   来源：Ardot 画布「Skill OS 设计系统」
+   Color(Light/Dark) · Size · Type 三组变量已全部写入
+   ========================================================================== */
+:root{
+  /* --- Color · Brand --- */
+  --primary:#2663EB;
+  --primary-hover:#1C4FD9;
+  --primary-soft:#F0F5FF;
+  --primary-border:#BFDBFF;
+
+  /* --- Color · Neutral --- */
+  --canvas:#F5F7FA;
+  --surface:#FFFFFF;
+  --surface-alt:#FAFAFA;
+  --border:#E5E8EB;
+  --divider:#F0F2F2;
+  --text-primary:#0F1729;
+  --text-secondary:#5C6373;
+  --text-tertiary:#99A3B2;
+  --inverse:#FFFFFF;
+
+  /* --- Color · Semantic --- */
+  --success:#17A34A;
+  --warning:#F59E0A;
+  --danger:#DB2626;
+  --info:#2663EB;
+
+  /* --- Color · Drift（产品视觉语言主体，色 + 形双编码） --- */
+  --drift-synced:#17A34A;
+  --drift-outdated:#2663EB;
+  --drift-modified:#F59E0A;
+  --drift-conflict:#DB2626;
+  --drift-missing:#94A3B8;
+  --drift-unmanaged:#7D3BED;
+  --drift-orphaned:#475469;
+
+  /* --- Color · Badge --- */
+  --badge-adapter:#0EA5E9;
+
+  /* --- Size --- */
+  --radius-card:12px;
+  --radius-control:8px;
+  --radius-tag:6px;
+  --radius-full:999px;
+  --space-xs:4px;
+  --space-sm:8px;
+  --space-md:16px;
+  --space-lg:24px;
+  --space-xl:32px;
+  --sidebar-w:236px;
+  --topbar-h:56px;
+  --row-h:44px;
+
+  /* --- Type --- */
+  --font-display:28px;
+  --font-h1:22px;
+  --font-h2:17px;
+  --font-h3:15px;
+  --font-body:14px;
+  --font-caption:12px;
+  --font-mono:13px;
+
+  /* --- Font Stacks（中文 Noto Sans SC / 拉丁 Inter / 代码 JetBrains Mono） --- */
+  --font-sans:Inter,"Noto Sans SC","PingFang SC","Microsoft YaHei",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --font-code:"JetBrains Mono","SF Mono",SFMono-Regular,Consolas,"Liberation Mono",monospace;
+
+  /* --- Elevation（仅浮层使用，卡片一律 1px 边框） --- */
+  --shadow-pop:0 1px 2px rgba(15,23,41,.04),0 8px 24px -4px rgba(15,23,41,.08);
+}
+
+[data-theme="Dark"]{
+  --primary:#3B82F7;
+  --primary-hover:#61A6FA;
+  --primary-soft:#17243D;
+  --primary-border:#1F3B8A;
+  --canvas:#0A1221;
+  --surface:#121A29;
+  --surface-alt:#17212E;
+  --border:#242B3D;
+  --divider:#1C2433;
+  --text-primary:#E8EDF2;
+  --text-secondary:#A1ABBA;
+  --text-tertiary:#6B7587;
+  --inverse:#0A1221;
+  --success:#21C45E;
+  --warning:#FABF24;
+  --danger:#F77070;
+  --drift-synced:#21C45E;
+  --drift-outdated:#3B82F7;
+  --drift-modified:#FABF24;
+  --drift-conflict:#F77070;
+  --drift-missing:#6B7587;
+  --drift-unmanaged:#A670FA;
+  --drift-orphaned:#808C9E;
+}
+
+/* ==========================================================================
+   Reset & Stage
+   ========================================================================== */
+*,*::before,*::after{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  margin:0;
+  min-height:100vh;
+  padding:32px 0 104px;
+  background:#E6E9EE;
+  font-family:var(--font-sans);
+  font-size:var(--font-body);
+  line-height:1.5;
+  color:var(--text-primary);
+  -webkit-font-smoothing:antialiased;
+  -moz-osx-font-smoothing:grayscale;
+}
+h1,h2,h3,h4,p{margin:0}
+button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer}
+svg{display:block;flex:none}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-thumb{background:rgba(15,23,41,.18);border-radius:99px;border:3px solid transparent;background-clip:content-box}
+
+/* 画布：1440 固定宽 + 等比缩放 */
+#viewport{position:relative;margin:0 auto;overflow:hidden}
+#stage{position:absolute;top:0;left:0;width:1440px;transform-origin:top left}
+.page{display:none;width:1440px}
+.page.active{display:flex}
+.page--col{flex-direction:column}
+.page--row{flex-direction:row}
+.page{
+  background:var(--surface);
+  box-shadow:0 0 0 1px rgba(15,23,41,.07),0 18px 44px -18px rgba(15,23,41,.22);
+}
+.page--canvas{background:var(--canvas)}
+.page--h1024{height:1024px}
+.page--h900{height:900px}
+
+/* 页面切换器（舞台控件，不属于设计稿本身） */
+.switcher{
+  position:fixed;left:50%;bottom:24px;transform:translateX(-50%);
+  z-index:99;display:flex;gap:4px;padding:5px;
+  background:rgba(15,23,41,.88);
+  border-radius:var(--radius-full);
+  box-shadow:0 8px 28px rgba(15,23,41,.30);
+  -webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);
+}
+.switcher button{
+  padding:7px 14px;border-radius:var(--radius-full);white-space:nowrap;
+  font-size:var(--font-caption);font-weight:500;letter-spacing:.2px;
+  color:rgba(255,255,255,.62);transition:background .16s,color .16s;
+}
+.switcher button:hover{color:#fff;background:rgba(255,255,255,.10)}
+.switcher button.active{background:#fff;color:var(--text-primary)}
+
+/* ==========================================================================
+   Layout Primitives
+   ========================================================================== */
+.stack{display:flex;flex-direction:column}
+.row{display:flex;align-items:center}
+.wrap{display:flex;flex-wrap:wrap}
+.grow{flex:1;min-width:0}
+.rule{width:100%;height:1px;background:var(--divider);flex:none}
+.rule--v{width:1px;height:100%;background:var(--border);flex:none}
+
+/* ==========================================================================
+   Component · Button
+   ========================================================================== */
+.btn{
+  display:inline-flex;align-items:center;justify-content:center;
+  height:36px;padding:0 16px;border-radius:var(--radius-control);
+  font-size:var(--font-body);font-weight:500;white-space:nowrap;
+  transition:background .16s,border-color .16s,color .16s;
+}
+.btn--primary{background:var(--primary);color:#fff}
+.btn--primary:hover{background:var(--primary-hover)}
+.btn--secondary{background:var(--surface);color:var(--text-primary);border:1px solid var(--border)}
+.btn--secondary:hover{background:var(--surface-alt)}
+.btn--ghost{padding:0 12px;color:var(--text-secondary)}
+.btn--ghost:hover{background:var(--surface-alt)}
+.btn--danger{background:var(--danger);color:#fff}
+.btn--soft{background:var(--primary-soft);color:var(--primary)}
+.btn--soft:hover{background:var(--primary-border)}
+.btn--disabled{background:var(--surface-alt);color:var(--text-tertiary);border:1px solid var(--border);cursor:not-allowed}
+.btn--sm{height:30px;padding:0 12px;font-size:var(--font-caption)}
+.btn--md{height:36px;padding:0 14px;font-size:13px}
+.btn--lg{height:44px;padding:0 20px}
+.btn--block{width:100%}
+
+/* ==========================================================================
+   Component · Form
+   ========================================================================== */
+.form-item{display:flex;flex-direction:column;gap:6px;width:280px}
+.form-item__label{font-size:var(--font-caption);font-weight:500;color:var(--text-secondary)}
+.form-item__label--focus{color:var(--primary)}
+.form-item__label--error{color:var(--danger)}
+.form-item__hint{font-size:var(--font-caption);color:var(--danger)}
+.field{
+  display:flex;align-items:center;gap:8px;
+  height:36px;padding:0 12px;
+  background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--radius-control);
+  font-family:var(--font-code);font-size:var(--font-mono);color:var(--text-primary);
+}
+.field--focus{border:2px solid var(--primary)}
+.field--error{border:1px solid var(--danger)}
+.field--search{background:var(--surface);font-family:var(--font-sans);font-size:13px}
+.field__placeholder{color:var(--text-tertiary);font-family:var(--font-sans);font-size:13px}
+.field__value{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.field--select{justify-content:space-between}
+.field--select .field__value{font-family:var(--font-sans);font-size:13px}
+
+.checkbox{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text-primary)}
+.checkbox__box{width:18px;height:18px;flex:none}
+.radio{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text-primary)}
+.radio__dot{width:18px;height:18px;flex:none}
+
+/* ==========================================================================
+   Component · Tag / Badge / Daemon
+   ========================================================================== */
+.tag{
+  display:inline-flex;align-items:center;height:24px;padding:0 8px;
+  border-radius:var(--radius-tag);
+  font-size:var(--font-caption);font-weight:500;white-space:nowrap;
+}
+.tag--soft{background:var(--primary-soft);color:var(--primary)}
+.tag--neutral{background:var(--surface-alt);color:var(--text-secondary);border:1px solid var(--border)}
+.tag--version{background:var(--surface-alt);color:var(--text-secondary);border:1px solid var(--border);font-family:var(--font-code);font-weight:400}
+
+.badge{
+  display:inline-flex;align-items:center;gap:4px;height:24px;padding:0 8px 0 6px;
+  background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-tag);
+  font-size:var(--font-caption);color:var(--text-secondary);white-space:nowrap;
+}
+.badge--adapter{border-color:var(--badge-adapter);color:var(--badge-adapter)}
+
+.daemon{
+  display:inline-flex;align-items:center;gap:8px;height:32px;padding:0 12px 0 10px;
+  background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-control);
+  font-size:var(--font-caption);font-weight:500;white-space:nowrap;
+}
+.dot{width:8px;height:8px;border-radius:var(--radius-full);background:var(--success);flex:none}
+
+/* ==========================================================================
+   Component · DriftCell
+   ========================================================================== */
+.cell-demo{display:flex;flex-direction:column;align-items:center;gap:6px;width:64px;flex:none}
+.cell{
+  display:flex;align-items:center;justify-content:center;
+  width:44px;height:44px;
+  background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-control);
+}
+.cell-demo__label{font-size:10px;font-weight:500;color:var(--text-tertiary);white-space:nowrap}
+
+/* ==========================================================================
+   Component · Card / Stat
+   ========================================================================== */
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-card)}
+.stat{
+  display:flex;flex-direction:column;gap:6px;padding:16px;
+  background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-card);
+}
+.stat__label{font-size:var(--font-caption);font-weight:500;color:var(--text-secondary)}
+.stat__value{font-size:26px;font-weight:700;line-height:1.15;color:var(--text-primary);font-variant-numeric:tabular-nums}
+.stat__delta{font-size:var(--font-caption);color:var(--text-tertiary)}
+
+/* ==========================================================================
+   Component · Tabs
+   ========================================================================== */
+.tabs{display:flex;align-items:flex-end;gap:24px}
+.tab{display:flex;flex-direction:column;gap:8px;font-size:var(--font-body);font-weight:500;color:var(--text-secondary);transition:color .16s}
+.tab:hover{color:var(--text-primary)}
+.tab__line{height:2px;border-radius:1px;background:transparent}
+.tab.active{color:var(--primary);font-weight:600}
+.tab.active .tab__line{background:var(--primary)}
+
+/* ==========================================================================
+   App Shell · Sidebar / Topbar / Content
+   ========================================================================== */
+.sidebar{display:flex;width:var(--sidebar-w);flex:none;background:var(--surface)}
+.sidebar__inner{flex:1;display:flex;flex-direction:column;padding:16px;gap:6px;min-width:0}
+.sidebar__rule{width:1px;background:var(--border);flex:none}
+
+.brand{display:flex;align-items:center;gap:10px;padding-bottom:10px}
+.brand__logo{
+  width:30px;height:30px;flex:none;border-radius:var(--radius-control);
+  background:var(--primary);display:flex;align-items:center;justify-content:center;
+}
+.brand__name{font-size:16px;font-weight:700;letter-spacing:-.2px}
+
+.nav{display:flex;flex-direction:column;gap:4px;padding-top:6px;flex:1}
+.nav__item{
+  display:flex;align-items:center;gap:10px;height:36px;padding:0 10px;
+  border-radius:var(--radius-control);
+  font-size:13px;font-weight:500;color:var(--text-secondary);
+  transition:background .16s,color .16s;text-align:left;
+}
+.nav__item:hover{background:var(--surface-alt)}
+.nav__item.active{background:var(--primary-soft);color:var(--primary)}
+.nav__item svg{flex:none}
+
+.sidebar__daemon{
+  display:flex;align-items:center;gap:8px;padding:12px;
+  background:var(--surface-alt);border:1px solid var(--border);border-radius:10px;
+  font-size:var(--font-caption);font-weight:500;
+}
+
+.main{flex:1;display:flex;flex-direction:column;min-width:0}
+.topbar{
+  display:flex;align-items:center;justify-content:space-between;
+  height:var(--topbar-h);padding:0 24px;background:var(--surface);flex:none;
+}
+.topbar__title{font-size:var(--font-h2);font-weight:600}
+.topbar__left{display:flex;align-items:center;gap:10px}
+.topbar__right{display:flex;align-items:center;gap:12px}
+.topbar__right--tight{gap:10px}
+.crumbs{display:flex;align-items:center;gap:8px;font-size:13px}
+.crumbs__root{color:var(--text-tertiary)}
+.crumbs__sep{color:var(--text-tertiary)}
+.crumbs__current{font-family:var(--font-code);font-weight:500}
+
+.content{flex:1;display:flex;flex-direction:column;gap:20px;padding:24px;min-height:0}
+.content--tight{gap:16px}
+
+.search{
+  display:flex;align-items:center;gap:8px;
+  width:280px;height:36px;padding:0 12px;
+  background:var(--surface-alt);border:1px solid var(--border);border-radius:var(--radius-control);
+}
+.search__ph{color:var(--text-tertiary);font-size:13px}
+
+/* ==========================================================================
+   Dashboard · Drift Matrix
+   ========================================================================== */
+.card-head{
+  display:flex;align-items:center;justify-content:space-between;gap:12px;
+  padding:20px;flex:none;
+}
+.card-head__title{font-size:var(--font-h2);font-weight:600}
+.card-head__sub{margin-top:4px;font-size:var(--font-caption);color:var(--text-tertiary)}
+
+.legend{display:flex;align-items:center;gap:14px}
+.legend__item{display:flex;align-items:center;gap:6px;font-size:var(--font-caption);color:var(--text-secondary)}
+.legend__dot{width:10px;height:10px;border-radius:3px;flex:none}
+
+.matrix{display:flex;flex-direction:column}
+.matrix__head{display:flex;align-items:center;height:40px;padding:0 20px;flex:none}
+.matrix__body{display:flex;flex-direction:column}
+.matrix__row{display:flex;align-items:center;height:var(--row-h);padding:0 20px;flex:none}
+.matrix__body .matrix__row:nth-child(even){background:var(--surface-alt)}
+.col-name{flex:1;min-width:0;display:flex;align-items:center;gap:8px}
+.col{width:118px;flex:none;display:flex;align-items:center;justify-content:center}
+.head-label{font-size:var(--font-caption);font-weight:500;color:var(--text-tertiary)}
+.skill-name{font-family:var(--font-code);font-size:13px;color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+.mark{width:18px;height:18px;border-radius:5px;flex:none}
+.mark--synced{background:var(--drift-synced)}
+.mark--synced-star{background:var(--drift-synced);box-shadow:inset 0 0 0 2px var(--surface)}
+.mark--outdated{background:var(--drift-outdated)}
+.mark--modified{background:var(--drift-modified)}
+.mark--conflict{background:var(--drift-conflict)}
+.mark--missing{background:var(--drift-missing)}
+.mark--unmanaged{background:var(--drift-unmanaged)}
+.mark--orphaned{background:var(--drift-orphaned)}
+
+/* 最近同步记录 */
+.recent{display:flex;flex-direction:column;flex:none}
+.recent__row{display:flex;align-items:center;gap:12px;height:42px}
+.recent__time{width:52px;flex:none;font-family:var(--font-code);font-size:var(--font-caption);color:var(--text-tertiary)}
+.recent__desc{flex:1;min-width:0;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.recent__status{font-size:var(--font-caption);font-weight:500;flex:none}
+.t-success{color:var(--success)}
+.t-warning{color:var(--warning)}
+.t-danger{color:var(--danger)}
+.t-primary{color:var(--primary)}
+.t-tertiary{color:var(--text-tertiary)}
+
+/* ==========================================================================
+   Skill Detail
+   ========================================================================== */
+.detail-head{display:flex;align-items:center;justify-content:space-between;gap:16px;flex:none}
+.detail-head__left{display:flex;flex-direction:column;gap:4px;min-width:0}
+.detail-head__name{font-family:var(--font-code);font-size:var(--font-h1);font-weight:700;letter-spacing:-.3px}
+.detail-head__desc{font-size:13px;color:var(--text-secondary)}
+.detail-head__right{display:flex;align-items:center;gap:8px;flex:none}
+
+.detail-body{display:flex;gap:16px;flex:1;min-height:0}
+.tree-card{
+  width:240px;flex:none;display:flex;flex-direction:column;gap:8px;padding:14px;
+  background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-card);
+}
+.tree-card__title{font-size:13px;font-weight:600}
+.tree__item{
+  display:flex;align-items:center;height:28px;padding:0 8px;
+  border-radius:var(--radius-tag);
+  font-family:var(--font-code);font-size:var(--font-caption);color:var(--text-secondary);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  transition:background .16s,color .16s;
+}
+.tree__item:hover{background:var(--surface-alt)}
+.tree__item.active{background:var(--primary-soft);color:var(--primary);font-weight:500}
+
+.editor{
+  flex:1;min-width:0;display:flex;flex-direction:column;
+  background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-card);
+  overflow:hidden;
+}
+.editor__head{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:14px;flex:none;
+}
+.editor__meta{display:flex;align-items:center;gap:8px}
+.editor__name{font-family:var(--font-code);font-size:13px;font-weight:500}
+.editor__tag{
+  display:inline-flex;align-items:center;height:20px;padding:0 6px;
+  background:var(--surface-alt);border:1px solid var(--border);border-radius:var(--radius-tag);
+  font-family:var(--font-code);font-size:11px;color:var(--text-secondary);
+}
+.editor__code{flex:1;display:flex;gap:16px;padding:16px;overflow:hidden}
+.editor__lineno{
+  font-family:var(--font-code);font-size:var(--font-caption);line-height:20px;
+  color:var(--text-tertiary);text-align:right;white-space:pre;flex:none;
+}
+.editor__code-text{
+  font-family:var(--font-code);font-size:var(--font-caption);line-height:20px;
+  color:var(--text-primary);white-space:pre;flex:1;min-width:0;
+}
+
+/* ==========================================================================
+   Teams
+   ========================================================================== */
+.team-card{
+  display:flex;align-items:center;justify-content:space-between;gap:16px;
+  padding:20px;background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--radius-card);flex:none;
+}
+.team-card__left{display:flex;align-items:center;gap:14px;min-width:0}
+.team-card__logo{
+  width:46px;height:46px;flex:none;border-radius:10px;background:var(--primary-soft);
+  display:flex;align-items:center;justify-content:center;
+}
+.team-card__name{font-size:var(--font-h2);font-weight:600}
+.team-card__sub{margin-top:5px;font-size:var(--font-caption);color:var(--text-tertiary)}
+.team-card__right{display:flex;align-items:center;gap:10px;flex:none}
+
+.list-card{
+  padding:20px;background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--radius-card);flex:none;
+}
+.list-card__title{font-size:var(--font-h3);font-weight:600}
+.member{display:flex;align-items:center;gap:12px;height:50px}
+.member__avatar{width:32px;height:32px;flex:none;border-radius:var(--radius-full)}
+.member__name{flex:1;min-width:0;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.member__role{font-family:var(--font-code);font-size:var(--font-caption);color:var(--text-secondary);flex:none}
+.cr{display:flex;align-items:center;gap:12px;height:50px}
+.cr__title{flex:1;min-width:0;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cr__author{font-size:var(--font-caption);color:var(--text-secondary);flex:none}
+.cr__status{font-size:var(--font-caption);font-weight:500;flex:none;width:52px;text-align:right}
+
+/* ==========================================================================
+   Sign In
+   ========================================================================== */
+.login-left{
+  flex:1;min-width:0;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  gap:20px;padding:72px;
+  background:linear-gradient(135deg,#2663EB 0%,#122980 100%);
+}
+.login-left__logo{
+  width:56px;height:56px;border-radius:14px;background:#fff;
+  display:flex;align-items:center;justify-content:center;
+}
+.login-left__title{font-size:32px;font-weight:700;color:#fff;text-align:center;letter-spacing:-.6px}
+.login-left__sub{font-size:var(--font-h3);color:rgba(255,255,255,.78);text-align:center}
+.features{display:flex;flex-direction:column;gap:12px;width:460px;padding-top:16px;margin-top:0}
+.feature{display:flex;align-items:center;gap:10px}
+.feature__text{font-size:var(--font-body);color:rgba(255,255,255,.86)}
+
+.login-right{
+  width:560px;flex:none;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  gap:0;padding:64px;background:var(--surface);
+}
+.login-form{display:flex;flex-direction:column;gap:18px;width:360px}
+.login-form__title{font-size:var(--font-h1);font-weight:700}
+.login-form__desc{font-size:13px;color:var(--text-secondary)}
+.login-form .form-item{width:100%}
+.login-form .field{height:40px;font-family:var(--font-code);font-size:13px;background:var(--surface-alt)}
+.login-form__tip{font-size:var(--font-caption);color:var(--text-tertiary);text-align:center}
+
+/* ==========================================================================
+   Design Tokens Page
+   ========================================================================== */
+.spec{padding:48px;gap:20px;background:var(--surface)}
+.spec__title{font-size:var(--font-display);font-weight:700;letter-spacing:-.5px}
+.spec__sub{font-size:var(--font-body);color:var(--text-secondary)}
+.spec__label{font-size:var(--font-h3);font-weight:600}
+.swatch{
+  width:150px;height:84px;flex:none;padding:10px;border-radius:var(--radius-control);
+  display:flex;flex-direction:column;justify-content:flex-end;gap:2px;
+}
+.swatch--line{border:1px solid var(--border)}
+.swatch--lite{color:var(--text-primary)}
+.swatch--dark{color:#fff}
+.swatch__name{font-size:var(--font-caption);font-weight:600}
+.swatch__hex{font-family:var(--font-code);font-size:11px}
+.meta-2{font-size:11px;line-height:16px;font-weight:500}
+
+.drift-tile{width:180px;flex:none;display:flex;flex-direction:column;gap:8px}
+.drift-tile__chip{
+  height:56px;border-radius:var(--radius-control);
+  display:flex;align-items:center;justify-content:center;
+}
+.drift-tile__chip--star{box-shadow:inset 0 0 0 2px rgba(255,255,255,.9)}
+.drift-tile__name{font-size:var(--font-caption);font-weight:600}
+.drift-tile__desc{font-size:11px;color:var(--text-secondary)}
+
+.sem-tile{width:180px;flex:none;display:flex;flex-direction:column;gap:8px}
+.sem-tile__chip{height:56px;border-radius:var(--radius-control)}
+.sem-tile__meta{font-size:11px;line-height:16px;font-weight:500;color:var(--text-secondary)}
+
+.type-row{display:flex;align-items:center;gap:24px;padding:6px}
+.type-row__key{width:200px;flex:none;font-family:var(--font-code);font-size:var(--font-caption);color:var(--text-tertiary)}
+
+.space-item{width:120px;flex:none;display:flex;flex-direction:column;gap:8px}
+.radius-item{width:120px;flex:none;display:flex;flex-direction:column;gap:8px}
+.radius-item__box{
+  width:64px;height:64px;background:var(--primary-soft);border:1px solid var(--primary-border);
+}
+.mono-meta{font-family:var(--font-code);font-size:11px;color:var(--text-secondary)}
+
+.elev-sample{
+  width:320px;flex:none;padding:16px;border-radius:var(--radius-card);
+  background:var(--surface);border:1px solid var(--border);
+  box-shadow:var(--shadow-pop);
+}
+.elev-sample__t{font-size:13px;font-weight:500}
+.elev-sample__d{margin-top:4px;font-size:11px;line-height:16px;color:var(--text-secondary)}
+.layout-note{font-size:var(--font-caption);line-height:20px;color:var(--text-secondary)}
+</style>
+</head>
+<body>
+
+<nav class="switcher" id="switcher">
+  <button data-page="tokens">01 设计规范</button>
+  <button data-page="components">02 组件库</button>
+  <button data-page="dashboard">03 Dashboard</button>
+  <button data-page="detail">04 Skill 详情</button>
+  <button data-page="teams">05 Teams</button>
+  <button data-page="login">06 登录</button>
+</nav>
+
+<div id="viewport">
+<div id="stage">
+
+<!-- ============================================================
+     01 设计规范 — Design Tokens
+     ============================================================ -->
+<section class="page page--col spec" data-page="tokens">
+
+  <div class="stack" style="gap:8px">
+    <h1 class="spec__title">Skill OS 设计系统</h1>
+    <p class="spec__sub">Agent 能力的包管理器与分发层 · 浅色主题 · 科技蓝 #2663EB · 冷灰中性色 · 状态优先</p>
+  </div>
+
+  <div class="spec__label">01&nbsp;&nbsp;主色阶&nbsp;&nbsp;Brand</div>
+  <div class="wrap" style="gap:12px">
+    <div class="swatch swatch--dark" style="background:var(--primary)">
+      <span class="swatch__name">primary</span><span class="swatch__hex">#2663EB</span>
+    </div>
+    <div class="swatch swatch--dark" style="background:var(--primary-hover)">
+      <span class="swatch__name">primaryHover</span><span class="swatch__hex">#1C4FD9</span>
+    </div>
+    <div class="swatch swatch--line" style="background:var(--primary-soft)">
+      <span class="swatch__name" style="color:var(--primary)">primarySoft</span>
+      <span class="swatch__hex" style="color:var(--primary)">#F0F5FF</span>
+    </div>
+    <div class="swatch" style="background:var(--primary-border)">
+      <span class="swatch__name" style="color:#1E40AF">primaryBorder</span>
+      <span class="swatch__hex" style="color:#1E40AF">#BFDBFF</span>
+    </div>
+  </div>
+
+  <div class="spec__label">02&nbsp;&nbsp;中性阶&nbsp;&nbsp;Neutral</div>
+  <div class="wrap" style="gap:12px">
+    <div class="swatch swatch--line" style="background:var(--canvas)">
+      <span class="meta-2">canvas<br>#F5F7FA</span>
+    </div>
+    <div class="swatch swatch--line" style="background:var(--surface)">
+      <span class="meta-2">surface<br>#FFFFFF</span>
+    </div>
+    <div class="swatch swatch--line" style="background:var(--surface-alt)">
+      <span class="meta-2">surfaceAlt<br>#FAFAFA</span>
+    </div>
+    <div class="swatch" style="background:var(--border)">
+      <span class="meta-2">border<br>#E5E8EB</span>
+    </div>
+    <div class="swatch" style="background:var(--divider)">
+      <span class="meta-2">divider<br>#F0F2F2</span>
+    </div>
+    <div class="swatch" style="background:var(--text-primary)">
+      <span class="meta-2" style="color:#fff">textPrimary<br>#0F1729</span>
+    </div>
+    <div class="swatch" style="background:var(--text-secondary)">
+      <span class="meta-2" style="color:#fff">textSecondary<br>#5C6373</span>
+    </div>
+    <div class="swatch" style="background:var(--text-tertiary)">
+      <span class="meta-2" style="color:#fff">textTertiary<br>#99A3B2</span>
+    </div>
+  </div>
+
+  <div class="spec__label">03&nbsp;&nbsp;漂移状态色&nbsp;&nbsp;Drift States · 色 + 形双编码</div>
+  <div class="wrap" style="gap:12px">
+
+    <div class="drift-tile">
+      <div class="drift-tile__chip" style="background:var(--drift-synced)">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="6" fill="#fff"/></svg>
+      </div>
+      <span class="drift-tile__name">SYNCED</span>
+      <span class="drift-tile__desc">磁盘 == 仓库</span>
+    </div>
+
+    <div class="drift-tile">
+      <div class="drift-tile__chip" style="background:var(--drift-outdated)">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M12 19V5M6 11l6-6 6 6" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <span class="drift-tile__name">OUTDATED</span>
+      <span class="drift-tile__desc">仓库领先，可 push</span>
+    </div>
+
+    <div class="drift-tile">
+      <div class="drift-tile__chip" style="background:var(--drift-modified)">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="7" fill="#fff"/><circle cx="12" cy="12" r="3" fill="#F59E0A"/></svg>
+      </div>
+      <span class="drift-tile__name">MODIFIED</span>
+      <span class="drift-tile__desc">磁盘被手改</span>
+    </div>
+
+    <div class="drift-tile">
+      <div class="drift-tile__chip" style="background:var(--drift-conflict)">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="#fff" stroke-width="2"/><circle cx="12" cy="12" r="4.5" fill="#fff"/></svg>
+      </div>
+      <span class="drift-tile__name">CONFLICT</span>
+      <span class="drift-tile__desc">两边都改，需人工</span>
+    </div>
+
+    <div class="drift-tile">
+      <div class="drift-tile__chip" style="background:var(--drift-missing)">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="6.5" stroke="#fff" stroke-width="2.5"/></svg>
+      </div>
+      <span class="drift-tile__name">MISSING</span>
+      <span class="drift-tile__desc">应装未装</span>
+    </div>
+
+    <div class="drift-tile">
+      <div class="drift-tile__chip" style="background:var(--drift-unmanaged)">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><rect x="5" y="5" width="14" height="14" rx="3.5" stroke="#fff" stroke-width="2.2" stroke-dasharray="3.5 3"/></svg>
+      </div>
+      <span class="drift-tile__name">UNMANAGED</span>
+      <span class="drift-tile__desc">装了但未纳管</span>
+    </div>
+
+    <div class="drift-tile">
+      <div class="drift-tile__chip" style="background:var(--drift-orphaned)">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M6 18L18 6" stroke="#fff" stroke-width="3" stroke-linecap="round"/></svg>
+      </div>
+      <span class="drift-tile__name">ORPHANED</span>
+      <span class="drift-tile__desc">canonical 已删，磁盘残留</span>
+    </div>
+
+    <div class="drift-tile">
+      <div class="drift-tile__chip drift-tile__chip--star" style="background:var(--drift-synced)">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="5" fill="#fff"/><circle cx="12" cy="12" r="9.5" stroke="#fff" stroke-width="1.8" stroke-dasharray="3 3"/></svg>
+      </div>
+      <span class="drift-tile__name">SYNCED*</span>
+      <span class="drift-tile__desc">含未纳管资产（非第 8 态）</span>
+    </div>
+
+  </div>
+
+  <div class="spec__label">04&nbsp;&nbsp;语义色与徽标&nbsp;&nbsp;Semantic &amp; Badges</div>
+  <div class="wrap" style="gap:12px">
+    <div class="sem-tile">
+      <div class="sem-tile__chip" style="background:var(--success)"></div>
+      <span class="sem-tile__meta">success / driftSynced<br>#17A34A</span>
+    </div>
+    <div class="sem-tile">
+      <div class="sem-tile__chip" style="background:var(--warning)"></div>
+      <span class="sem-tile__meta">warning / driftModified<br>#F59E0A</span>
+    </div>
+    <div class="sem-tile">
+      <div class="sem-tile__chip" style="background:var(--danger)"></div>
+      <span class="sem-tile__meta">danger / driftConflict<br>#DB2626</span>
+    </div>
+    <div class="sem-tile">
+      <div class="sem-tile__chip" style="background:var(--badge-adapter)"></div>
+      <span class="sem-tile__meta">徽标 · 模板已升级<br>#0EA5E9</span>
+    </div>
+    <div class="sem-tile">
+      <div class="sem-tile__chip" style="background:var(--surface-alt);border:1px solid var(--border)"></div>
+      <span class="sem-tile__meta">徽标 · 含未纳管资产<br>描边型中性标签</span>
+    </div>
+  </div>
+
+  <div class="spec__label">05&nbsp;&nbsp;字体与排版&nbsp;&nbsp;Typography · 中文 Noto Sans SC / 拉丁 Inter / 代码 JetBrains Mono</div>
+  <div class="stack" style="gap:2px">
+    <div class="type-row">
+      <span class="type-row__key">Display · 28</span>
+      <span style="font-size:28px;font-weight:700;letter-spacing:-.5px">Skill OS</span>
+    </div>
+    <div class="type-row">
+      <span class="type-row__key">H1 · 22</span>
+      <span style="font-size:22px;font-weight:700">能力总览</span>
+    </div>
+    <div class="type-row">
+      <span class="type-row__key">H2 · 17</span>
+      <span style="font-size:17px;font-weight:600">四端漂移矩阵</span>
+    </div>
+    <div class="type-row">
+      <span class="type-row__key">H3 · 15</span>
+      <span style="font-size:15px;font-weight:500">基本信息与依赖</span>
+    </div>
+    <div class="type-row">
+      <span class="type-row__key">Body · 14</span>
+      <span style="font-size:14px">扫描 Runtime 目录树，识别 Skill 包边界</span>
+    </div>
+    <div class="type-row">
+      <span class="type-row__key">Caption · 12</span>
+      <span style="font-size:12px;color:var(--text-secondary)">最后同步于 2 分钟前 · daemon 在线</span>
+    </div>
+    <div class="type-row">
+      <span class="type-row__key">Mono · 13</span>
+      <span style="font-family:var(--font-code);font-size:13px">hash 3f9a2c1e · commit a71b4d8</span>
+    </div>
+  </div>
+
+  <div class="spec__label">06&nbsp;&nbsp;间距刻度&nbsp;&nbsp;Spacing · 4 基数</div>
+  <div class="wrap" style="gap:20px">
+    <div class="space-item"><div style="width:12px;height:12px;border-radius:3px;background:var(--primary)"></div><span class="mono-meta">spaceXs · 4</span></div>
+    <div class="space-item"><div style="width:24px;height:12px;border-radius:3px;background:var(--primary)"></div><span class="mono-meta">spaceSm · 8</span></div>
+    <div class="space-item"><div style="width:48px;height:12px;border-radius:3px;background:var(--primary)"></div><span class="mono-meta">spaceMd · 16</span></div>
+    <div class="space-item"><div style="width:72px;height:12px;border-radius:3px;background:var(--primary)"></div><span class="mono-meta">spaceLg · 24</span></div>
+    <div class="space-item"><div style="width:96px;height:12px;border-radius:3px;background:var(--primary)"></div><span class="mono-meta">spaceXl · 32</span></div>
+  </div>
+
+  <div class="spec__label">07&nbsp;&nbsp;圆角&nbsp;&nbsp;Radius</div>
+  <div class="wrap" style="gap:20px">
+    <div class="radius-item"><div class="radius-item__box" style="border-radius:6px"></div><span class="mono-meta">radiusTag · 6</span></div>
+    <div class="radius-item"><div class="radius-item__box" style="border-radius:8px"></div><span class="mono-meta">radiusControl · 8</span></div>
+    <div class="radius-item"><div class="radius-item__box" style="border-radius:12px"></div><span class="mono-meta">radiusCard · 12</span></div>
+    <div class="radius-item"><div class="radius-item__box" style="border-radius:32px"></div><span class="mono-meta">radiusFull · 999</span></div>
+  </div>
+
+  <div class="row" style="gap:32px;align-items:center">
+    <div class="elev-sample">
+      <div class="elev-sample__t">浮层阴影 elevation</div>
+      <div class="elev-sample__d">仅用于 Popover / Modal / Toast；卡片一律用 1px 边框，不堆阴影</div>
+    </div>
+    <div class="layout-note grow">布局骨架<br>侧栏 236 · 浅色 surface + 1px 右边框<br>顶栏 56 · 底部 1px 分隔线<br>内容区全宽 · padding 24<br>表格行高 44 · 数字用等宽对齐</div>
+  </div>
+
+</section>
+
+<!-- ============================================================
+     02 组件库 — Components
+     ============================================================ -->
+<section class="page page--col spec" data-page="components" style="gap:28px">
+
+  <div class="stack" style="gap:8px">
+    <h1 class="spec__title">Skill OS 组件库</h1>
+    <p class="spec__sub">基础控件 + 领域组件 · 全部绑定设计变量，可随主题切换</p>
+  </div>
+
+  <div class="spec__label">01&nbsp;&nbsp;按钮&nbsp;&nbsp;Button · 高 36 / 圆角 8 / 水平内边距 16</div>
+  <div class="wrap" style="gap:12px;align-items:center">
+    <button class="btn btn--primary">一键分发</button>
+    <button class="btn btn--secondary">扫描目录</button>
+    <button class="btn btn--ghost">取消</button>
+    <button class="btn btn--danger">撤销设备</button>
+    <button class="btn btn--soft">查看 diff</button>
+    <button class="btn btn--disabled">daemon 离线</button>
+  </div>
+
+  <div class="spec__label">02&nbsp;&nbsp;表单控件&nbsp;&nbsp;Form Controls · 高 36 / 圆角 8</div>
+  <div class="wrap" style="gap:20px">
+
+    <div class="form-item">
+      <span class="form-item__label">Skill slug</span>
+      <div class="field"><span class="field__value">code-review</span></div>
+    </div>
+
+    <div class="form-item">
+      <span class="form-item__label form-item__label--focus">仓库路径</span>
+      <div class="field field--focus"><span class="field__value">~/skillos/canonical</span></div>
+    </div>
+
+    <div class="form-item">
+      <span class="form-item__label form-item__label--error">目标 Runtime</span>
+      <div class="field field--error"><span class="field__value">windsurf</span></div>
+      <span class="form-item__hint">不在 Runtime 白名单内</span>
+    </div>
+
+    <div class="form-item">
+      <span class="form-item__label">全局搜索</span>
+      <div class="field field--search">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="7" cy="7" r="4.5" stroke="#99A3B2" stroke-width="1.6"/><path d="M10.5 10.5L14 14" stroke="#99A3B2" stroke-width="1.6" stroke-linecap="round"/></svg>
+        <span class="field__placeholder">搜索 name / description / tag</span>
+      </div>
+    </div>
+
+    <div class="form-item">
+      <span class="form-item__label">目标 Runtime</span>
+      <div class="field field--select">
+        <span class="field__value">Claude Code</span>
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4 6L8 10L12 6" stroke="#5C6373" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+    </div>
+
+    <div class="form-item" style="padding-top:22px">
+      <span class="checkbox">
+        <svg class="checkbox__box" viewBox="0 0 18 18" fill="none"><rect width="18" height="18" rx="4" fill="#2663EB"/><path d="M5 9.2L7.8 12L13 6.5" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        同时分发到 .codex
+      </span>
+    </div>
+
+    <div class="form-item" style="padding-top:22px">
+      <span class="radio">
+        <svg class="radio__dot" viewBox="0 0 18 18" fill="none"><circle cx="9" cy="9" r="8" stroke="#2663EB" stroke-width="2"/><circle cx="9" cy="9" r="3.5" fill="#2663EB"/></svg>
+        保留仓库版本
+      </span>
+    </div>
+
+  </div>
+
+  <div class="spec__label">03&nbsp;&nbsp;标签与徽标&nbsp;&nbsp;Tags &amp; Badges</div>
+  <div class="wrap" style="gap:12px;align-items:center">
+    <span class="tag tag--soft">已纳管</span>
+    <span class="tag tag--neutral">私有</span>
+    <span class="tag tag--version">v1.4.0</span>
+    <span class="badge">
+      <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M6 1.2L11 10.4H1L6 1.2Z" stroke="#5C6373" stroke-width="1.2" stroke-linejoin="round"/><path d="M6 4.8V7" stroke="#5C6373" stroke-width="1.2" stroke-linecap="round"/><circle cx="6" cy="8.8" r="0.7" fill="#5C6373"/></svg>
+      含未纳管资产
+    </span>
+    <span class="badge badge--adapter">
+      <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M6 10.5V1.5M2.5 5L6 1.5L9.5 5" stroke="#0EA5E9" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      模板已升级
+    </span>
+    <span class="daemon"><span class="dot"></span>daemon 在线</span>
+  </div>
+
+  <div class="spec__label">04&nbsp;&nbsp;漂移状态格&nbsp;&nbsp;DriftCell · 矩阵最小单元（44×44 / 圆角 8 / 白底 + 状态标记）</div>
+  <div class="wrap" style="gap:16px">
+
+    <div class="cell-demo">
+      <div class="cell"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="4.5" fill="#17A34A"/></svg></div>
+      <span class="cell-demo__label">SYNCED</span>
+    </div>
+
+    <div class="cell-demo">
+      <div class="cell"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="3.5" fill="#17A34A"/><circle cx="8" cy="8" r="6.5" stroke="#17A34A" stroke-width="1.4" stroke-dasharray="2.2 2.2"/></svg></div>
+      <span class="cell-demo__label">SYNCED*</span>
+    </div>
+
+    <div class="cell-demo">
+      <div class="cell"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 12.5V3.5M4 7.5L8 3.5L12 7.5" stroke="#2663EB" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+      <span class="cell-demo__label">OUTDATED</span>
+    </div>
+
+    <div class="cell-demo">
+      <div class="cell"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="5" fill="#F59E0A"/><circle cx="8" cy="8" r="2" fill="#fff"/></svg></div>
+      <span class="cell-demo__label">MODIFIED</span>
+    </div>
+
+    <div class="cell-demo">
+      <div class="cell"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6.5" stroke="#DB2626" stroke-width="1.6"/><circle cx="8" cy="8" r="3.2" fill="#DB2626"/></svg></div>
+      <span class="cell-demo__label">CONFLICT</span>
+    </div>
+
+    <div class="cell-demo">
+      <div class="cell"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="4.5" stroke="#94A3B8" stroke-width="1.8"/></svg></div>
+      <span class="cell-demo__label">MISSING</span>
+    </div>
+
+    <div class="cell-demo">
+      <div class="cell"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="3" y="3" width="10" height="10" rx="2.5" stroke="#7D3BED" stroke-width="1.6" stroke-dasharray="2.4 2"/></svg></div>
+      <span class="cell-demo__label">UNMANAGED</span>
+    </div>
+
+    <div class="cell-demo">
+      <div class="cell"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4 12L12 4" stroke="#475469" stroke-width="2" stroke-linecap="round"/></svg></div>
+      <span class="cell-demo__label">ORPHANED</span>
+    </div>
+
+  </div>
+
+  <div class="spec__label">05&nbsp;&nbsp;卡片与统计&nbsp;&nbsp;Card &amp; Stat · 卡片用 1px 边框，不用阴影</div>
+  <div class="wrap" style="gap:16px">
+    <div class="stat" style="width:248px">
+      <span class="stat__label">Skill 总数</span>
+      <span class="stat__value">62</span>
+      <span class="stat__delta">4 端 · 已纳管 58</span>
+    </div>
+    <div class="stat" style="width:248px">
+      <span class="stat__label">漂移告警</span>
+      <span class="stat__value" style="color:var(--danger)">14</span>
+      <span class="stat__delta">冲突 2 · 待确认 9</span>
+    </div>
+    <div class="stat" style="width:248px">
+      <span class="stat__label">daemon 状态</span>
+      <span class="stat__value" style="color:var(--success)">在线</span>
+      <span class="stat__delta">最后同步 2 分钟前</span>
+    </div>
+  </div>
+
+  <div class="spec__label">06&nbsp;&nbsp;导航标签&nbsp;&nbsp;Tabs</div>
+  <div class="tabs" style="align-items:flex-start">
+    <button class="tab active"><span>Files</span><span class="tab__line"></span></button>
+    <button class="tab"><span>Diff</span><span class="tab__line"></span></button>
+    <button class="tab"><span>Versions</span><span class="tab__line"></span></button>
+    <button class="tab"><span>Checks</span><span class="tab__line"></span></button>
+  </div>
+
+</section>
+
+
+<!-- ============================================================
+     03 Dashboard — 能力总览
+     ============================================================ -->
+<section class="page page--row page--canvas page--h1024" data-page="dashboard">
+
+  <aside class="sidebar">
+    <div class="sidebar__inner">
+      <div class="brand">
+        <div class="brand__logo">
+          <svg width="18" height="18" viewBox="0 0 16 16" fill="none"><path d="M8 1.5L14 4.8L8 8.1L2 4.8L8 1.5Z" fill="#fff"/><path d="M2 8L8 11.3L14 8" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity=".65"/><path d="M2 11.2L8 14.5L14 11.2" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity=".35"/></svg>
+        </div>
+        <span class="brand__name">Skill OS</span>
+      </div>
+
+      <nav class="nav">
+        <button class="nav__item" data-nav="overview">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="2" y="2" width="5" height="5" rx="1.5" stroke="currentColor" stroke-width="1.5"/><rect x="9" y="2" width="5" height="5" rx="1.5" stroke="currentColor" stroke-width="1.5"/><rect x="2" y="9" width="5" height="5" rx="1.5" stroke="currentColor" stroke-width="1.5"/><rect x="9" y="9" width="5" height="5" rx="1.5" stroke="currentColor" stroke-width="1.5"/></svg>
+          能力总览
+        </button>
+        <button class="nav__item" data-nav="skills">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="2.5" y="2.5" width="11" height="11" rx="3" stroke="currentColor" stroke-width="1.5"/><path d="M5.5 8h5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+          Skill 库
+        </button>
+        <button class="nav__item" data-nav="teams">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="6" cy="5.5" r="2.5" stroke="currentColor" stroke-width="1.5"/><path d="M2 13c0-2.2 1.8-4 4-4s4 1.8 4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M11.2 4.4a2.5 2.5 0 010 4.4M12.6 13c0-1.5-.5-2.9-1.5-3.8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+          团队协作
+        </button>
+      </nav>
+
+      <div class="sidebar__daemon"><span class="dot"></span>daemon 在线</div>
+    </div>
+    <div class="sidebar__rule"></div>
+  </aside>
+
+  <div class="main">
+    <header class="topbar">
+      <h1 class="topbar__title">能力总览</h1>
+      <div class="topbar__right">
+        <div class="search">
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none"><circle cx="7" cy="7" r="4.5" stroke="#99A3B2" stroke-width="1.6"/><path d="M10.5 10.5L14 14" stroke="#99A3B2" stroke-width="1.6" stroke-linecap="round"/></svg>
+          <span class="search__ph">搜索 Skill…</span>
+        </div>
+        <button class="btn btn--md btn--secondary">重新扫描</button>
+        <button class="btn btn--md btn--primary">一键分发</button>
+      </div>
+    </header>
+    <div class="rule"></div>
+
+    <div class="content">
+
+      <div class="row" style="gap:16px;align-items:stretch">
+        <div class="stat grow">
+          <span class="stat__label">Skill 总数</span>
+          <span class="stat__value">62</span>
+          <span class="stat__delta">已纳管 58 · 未纳管 4</span>
+        </div>
+        <div class="stat grow">
+          <span class="stat__label">漂移告警</span>
+          <span class="stat__value" style="color:var(--danger)">14</span>
+          <span class="stat__delta">冲突 2 · 未同步 9 · 残留 1</span>
+        </div>
+        <div class="stat grow">
+          <span class="stat__label">daemon 状态</span>
+          <span class="stat__value" style="color:var(--success)">在线</span>
+          <span class="stat__delta">最后同步 2 分钟前</span>
+        </div>
+      </div>
+
+      <div class="card" style="flex:1;min-height:0;display:flex;flex-direction:column">
+        <div class="card-head">
+          <div>
+            <div class="card-head__title">四端漂移矩阵</div>
+            <div class="card-head__sub">行 = Skill · 列 = Runtime · 格 = 漂移状态</div>
+          </div>
+          <div class="legend">
+            <span class="legend__item"><span class="legend__dot" style="background:var(--drift-synced)"></span>已同步</span>
+            <span class="legend__item"><span class="legend__dot" style="background:var(--drift-outdated)"></span>待分发</span>
+            <span class="legend__item"><span class="legend__dot" style="background:var(--drift-conflict)"></span>需处理</span>
+          </div>
+        </div>
+        <div class="rule"></div>
+
+        <div class="matrix">
+          <div class="matrix__head">
+            <div class="col-name"><span class="head-label">Skill</span></div>
+            <div class="col"><span class="head-label">Claude Code</span></div>
+            <div class="col"><span class="head-label" style="font-family:var(--font-code)">agents</span></div>
+            <div class="col"><span class="head-label" style="font-family:var(--font-code)">workbuddy</span></div>
+            <div class="col"><span class="head-label" style="font-family:var(--font-code)">codex</span></div>
+          </div>
+          <div class="matrix__body">
+            <div class="matrix__row">
+              <div class="col-name"><span class="skill-name">code-review</span></div>
+              <div class="col"><span class="mark mark--synced"></span></div>
+              <div class="col"><span class="mark mark--synced"></span></div>
+              <div class="col"><span class="mark mark--outdated"></span></div>
+              <div class="col"><span class="mark mark--missing"></span></div>
+            </div>
+            <div class="matrix__row">
+              <div class="col-name"><span class="skill-name">brainstorming</span></div>
+              <div class="col"><span class="mark mark--synced"></span></div>
+              <div class="col"><span class="mark mark--synced"></span></div>
+              <div class="col"><span class="mark mark--modified"></span></div>
+              <div class="col"><span class="mark mark--synced-star"></span></div>
+            </div>
+            <div class="matrix__row">
+              <div class="col-name"><span class="skill-name">test-automation</span></div>
+              <div class="col"><span class="mark mark--conflict"></span></div>
+              <div class="col"><span class="mark mark--outdated"></span></div>
+              <div class="col"><span class="mark mark--synced"></span></div>
+              <div class="col"><span class="mark mark--unmanaged"></span></div>
+            </div>
+            <div class="matrix__row">
+              <div class="col-name"><span class="skill-name">xhs-keyword-mining</span></div>
+              <div class="col"><span class="mark mark--synced"></span></div>
+              <div class="col"><span class="mark mark--missing"></span></div>
+              <div class="col"><span class="mark mark--synced"></span></div>
+              <div class="col"><span class="mark mark--orphaned"></span></div>
+            </div>
+            <div class="matrix__row">
+              <div class="col-name"><span class="skill-name">req-review</span></div>
+              <div class="col"><span class="mark mark--modified"></span></div>
+              <div class="col"><span class="mark mark--synced"></span></div>
+              <div class="col"><span class="mark mark--synced"></span></div>
+              <div class="col"><span class="mark mark--outdated"></span></div>
+            </div>
+            <div class="matrix__row">
+              <div class="col-name"><span class="skill-name">meeting-notes</span></div>
+              <div class="col"><span class="mark mark--synced"></span></div>
+              <div class="col"><span class="mark mark--synced"></span></div>
+              <div class="col"><span class="mark mark--synced"></span></div>
+              <div class="col"><span class="mark mark--synced"></span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="padding:20px">
+        <div class="row" style="justify-content:space-between">
+          <span class="list-card__title">最近同步记录</span>
+          <button class="row" style="font-size:var(--font-caption);font-weight:500;color:var(--primary)">查看全部</button>
+        </div>
+        <div class="recent" style="margin-top:12px">
+          <div class="recent__row">
+            <span class="recent__time">16:42</span>
+            <span class="recent__desc">push&nbsp;&nbsp; code-review → workbuddy · 12 files</span>
+            <span class="recent__status t-success">成功</span>
+          </div>
+          <div class="recent__row">
+            <span class="recent__time">16:38</span>
+            <span class="recent__desc">pull&nbsp;&nbsp; brainstorming ← claude · 3 files</span>
+            <span class="recent__status t-success">成功</span>
+          </div>
+          <div class="recent__row">
+            <span class="recent__time">16:21</span>
+            <span class="recent__desc">rollback&nbsp;&nbsp; test-automation → v1.3.2</span>
+            <span class="recent__status t-success">成功</span>
+          </div>
+          <div class="recent__row">
+            <span class="recent__time">16:05</span>
+            <span class="recent__desc">push&nbsp;&nbsp; xhs-keyword-mining → codex</span>
+            <span class="recent__status t-danger">冲突中止</span>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+</section>
+
+<!-- ============================================================
+     04 Skill 详情 — code-review
+     ============================================================ -->
+<section class="page page--row page--canvas page--h1024" data-page="detail">
+
+  <aside class="sidebar">
+    <div class="sidebar__inner">
+      <div class="brand">
+        <div class="brand__logo">
+          <svg width="18" height="18" viewBox="0 0 16 16" fill="none"><path d="M8 1.5L14 4.8L8 8.1L2 4.8L8 1.5Z" fill="#fff"/><path d="M2 8L8 11.3L14 8" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity=".65"/><path d="M2 11.2L8 14.5L14 11.2" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity=".35"/></svg>
+        </div>
+        <span class="brand__name">Skill OS</span>
+      </div>
+
+      <nav class="nav">
+        <button class="nav__item" data-nav="overview">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="2" y="2" width="5" height="5" rx="1.5" stroke="currentColor" stroke-width="1.5"/><rect x="9" y="2" width="5" height="5" rx="1.5" stroke="currentColor" stroke-width="1.5"/><rect x="2" y="9" width="5" height="5" rx="1.5" stroke="currentColor" stroke-width="1.5"/><rect x="9" y="9" width="5" height="5" rx="1.5" stroke="currentColor" stroke-width="1.5"/></svg>
+          能力总览
+        </button>
+        <button class="nav__item" data-nav="skills">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="2.5" y="2.5" width="11" height="11" rx="3" stroke="currentColor" stroke-width="1.5"/><path d="M5.5 8h5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+          Skill 库
+        </button>
+        <button class="nav__item" data-nav="teams">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="6" cy="5.5" r="2.5" stroke="currentColor" stroke-width="1.5"/><path d="M2 13c0-2.2 1.8-4 4-4s4 1.8 4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M11.2 4.4a2.5 2.5 0 010 4.4M12.6 13c0-1.5-.5-2.9-1.5-3.8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+          团队协作
+        </button>
+      </nav>
+
+      <div class="sidebar__daemon"><span class="dot"></span>daemon 在线</div>
+    </div>
+    <div class="sidebar__rule"></div>
+  </aside>
+
+  <div class="main">
+    <header class="topbar">
+      <div class="crumbs">
+        <span class="crumbs__root">Skill 库</span>
+        <span class="crumbs__sep">/</span>
+        <span class="crumbs__current">code-review</span>
+      </div>
+      <div class="topbar__right topbar__right--tight">
+        <button class="btn btn--md btn--secondary">查看 diff</button>
+        <button class="btn btn--md btn--primary">分发到 4 端</button>
+      </div>
+    </header>
+    <div class="rule"></div>
+
+    <div class="content content--tight">
+
+      <div class="detail-head">
+        <div class="detail-head__left">
+          <span class="detail-head__name">code-review</span>
+          <span class="detail-head__desc">对变更代码做结构化审查，输出问题清单与修复建议</span>
+        </div>
+        <div class="detail-head__right">
+          <span class="badge">
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M6 1.2L11 10.4H1L6 1.2Z" stroke="#5C6373" stroke-width="1.2" stroke-linejoin="round"/><path d="M6 4.8V7" stroke="#5C6373" stroke-width="1.2" stroke-linecap="round"/><circle cx="6" cy="8.8" r="0.7" fill="#5C6373"/></svg>
+            含未纳管资产
+          </span>
+          <span class="badge badge--adapter">
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M6 10.5V1.5M2.5 5L6 1.5L9.5 5" stroke="#0EA5E9" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            模板已升级
+          </span>
+        </div>
+      </div>
+
+      <div class="stack" style="gap:0">
+        <div class="tabs" style="margin-bottom:-1px">
+          <button class="tab active"><span>Files</span><span class="tab__line"></span></button>
+          <button class="tab"><span>Diff</span><span class="tab__line"></span></button>
+          <button class="tab"><span>Versions</span><span class="tab__line"></span></button>
+          <button class="tab"><span>Checks</span><span class="tab__line"></span></button>
+        </div>
+        <div class="rule"></div>
+      </div>
+
+      <div class="detail-body">
+
+        <div class="tree-card">
+          <span class="tree-card__title">文件树</span>
+          <div class="tree__item active">SKILL.md</div>
+          <div class="tree__item">references/</div>
+          <div class="tree__item">scripts/</div>
+          <div class="tree__item">agents/openai.yaml</div>
+          <div class="tree__item">assets/logo-large.png</div>
+          <div class="tree__item">subskills/</div>
+        </div>
+
+        <div class="editor">
+          <div class="editor__head">
+            <div class="editor__meta">
+              <span class="editor__name">SKILL.md</span>
+              <span class="editor__tag">markdown</span>
+            </div>
+            <button class="btn btn--sm btn--primary">保存</button>
+          </div>
+          <div class="rule"></div>
+          <div class="editor__code">
+<pre class="editor__lineno">1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15</pre>
+<pre class="editor__code-text">---
+name: code-review
+description: 对变更代码做结构化审查，输出问题清单与修复建议
+allowed-tools: [Read, Grep]
+---
+
+# code-review
+
+审查顺序：
+1. 变更范围是否与需求一致
+2. 是否存在越权写操作
+3. 错误处理是否覆盖边界
+4. 是否有未处理的 TODO
+
+输出：问题清单 + 修复建议</pre>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+</section>
+
+<!-- ============================================================
+     05 Teams — 团队协作
+     ============================================================ -->
+<section class="page page--row page--canvas page--h1024" data-page="teams">
+
+  <aside class="sidebar">
+    <div class="sidebar__inner">
+      <div class="brand">
+        <div class="brand__logo">
+          <svg width="18" height="18" viewBox="0 0 16 16" fill="none"><path d="M8 1.5L14 4.8L8 8.1L2 4.8L8 1.5Z" fill="#fff"/><path d="M2 8L8 11.3L14 8" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity=".65"/><path d="M2 11.2L8 14.5L14 11.2" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity=".35"/></svg>
+        </div>
+        <span class="brand__name">Skill OS</span>
+      </div>
+
+      <nav class="nav">
+        <button class="nav__item" data-nav="overview">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="2" y="2" width="5" height="5" rx="1.5" stroke="currentColor" stroke-width="1.5"/><rect x="9" y="2" width="5" height="5" rx="1.5" stroke="currentColor" stroke-width="1.5"/><rect x="2" y="9" width="5" height="5" rx="1.5" stroke="currentColor" stroke-width="1.5"/><rect x="9" y="9" width="5" height="5" rx="1.5" stroke="currentColor" stroke-width="1.5"/></svg>
+          能力总览
+        </button>
+        <button class="nav__item" data-nav="skills">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="2.5" y="2.5" width="11" height="11" rx="3" stroke="currentColor" stroke-width="1.5"/><path d="M5.5 8h5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+          Skill 库
+        </button>
+        <button class="nav__item" data-nav="teams">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="6" cy="5.5" r="2.5" stroke="currentColor" stroke-width="1.5"/><path d="M2 13c0-2.2 1.8-4 4-4s4 1.8 4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M11.2 4.4a2.5 2.5 0 010 4.4M12.6 13c0-1.5-.5-2.9-1.5-3.8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+          团队协作
+        </button>
+      </nav>
+
+      <div class="sidebar__daemon"><span class="dot"></span>daemon 在线</div>
+    </div>
+    <div class="sidebar__rule"></div>
+  </aside>
+
+  <div class="main">
+    <header class="topbar">
+      <h1 class="topbar__title">团队协作</h1>
+      <div class="topbar__right topbar__right--tight">
+        <button class="btn btn--md btn--primary">邀请成员</button>
+      </div>
+    </header>
+    <div class="rule"></div>
+
+    <div class="content">
+
+      <div class="team-card">
+        <div class="team-card__left">
+          <div class="team-card__logo">
+            <svg width="24" height="24" viewBox="0 0 22 22" fill="none"><circle cx="8.5" cy="7.5" r="3.2" stroke="#2663EB" stroke-width="1.8"/><path d="M2.5 18c0-3 2.7-5.5 6-5.5s6 2.5 6 5.5" stroke="#2663EB" stroke-width="1.8" stroke-linecap="round"/><path d="M15 6.2a3.2 3.2 0 010 5.6M17 18c0-2.1-.8-4-2.1-5.2" stroke="#2663EB" stroke-width="1.8" stroke-linecap="round"/></svg>
+          </div>
+          <div>
+            <div class="team-card__name">Skill OS 核心组</div>
+            <div class="team-card__sub">4 名成员 · 62 个 Skill · 我的角色 owner</div>
+          </div>
+        </div>
+        <div class="team-card__right">
+          <button class="btn btn--md btn--secondary">提交 Change Request</button>
+        </div>
+      </div>
+
+      <div class="list-card">
+        <div class="list-card__title">成员</div>
+        <div style="margin-top:8px">
+          <div class="member">
+            <span class="member__avatar" style="background:var(--primary)"></span>
+            <span class="member__name">半闲 · banxian@skillos.dev</span>
+            <span class="member__role">owner</span>
+          </div>
+          <div class="member">
+            <span class="member__avatar" style="background:#7D3BED"></span>
+            <span class="member__name">林工 · lin@skillos.dev</span>
+            <span class="member__role">member</span>
+          </div>
+          <div class="member">
+            <span class="member__avatar" style="background:#0EA5E9"></span>
+            <span class="member__name">陈测试 · chen@skillos.dev</span>
+            <span class="member__role">member</span>
+          </div>
+          <div class="member">
+            <span class="member__avatar" style="background:#F59E0A"></span>
+            <span class="member__name">赵审 · zhao@skillos.dev</span>
+            <span class="member__role">viewer</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="list-card">
+        <div class="list-card__title">Change Request</div>
+        <div style="margin-top:8px">
+          <div class="cr">
+            <span class="cr__title">feat: test-automation 增加覆盖率检查</span>
+            <span class="cr__author">林工</span>
+            <span class="cr__status t-warning">待审查</span>
+          </div>
+          <div class="cr">
+            <span class="cr__title">fix: code-review 修正 allowed-tools 白名单</span>
+            <span class="cr__author">陈测试</span>
+            <span class="cr__status t-success">已合并</span>
+          </div>
+          <div class="cr">
+            <span class="cr__title">docs: 补充 subskills 嵌套结构的说明</span>
+            <span class="cr__author">半闲</span>
+            <span class="cr__status t-tertiary">已关闭</span>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+</section>
+
+<!-- ============================================================
+     06 Sign In — 登录
+     ============================================================ -->
+<section class="page page--row page--h900" data-page="login">
+
+  <div class="login-left">
+    <div class="login-left__logo">
+      <svg width="30" height="30" viewBox="0 0 16 16" fill="none"><path d="M8 1.5L14 4.8L8 8.1L2 4.8L8 1.5Z" fill="#2663EB"/><path d="M2 8L8 11.3L14 8" stroke="#2663EB" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity=".65"/><path d="M2 11.2L8 14.5L14 11.2" stroke="#2663EB" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity=".35"/></svg>
+    </div>
+    <div class="login-left__title">Skill OS</div>
+    <div class="login-left__sub">Agent 能力的包管理器与分发层</div>
+
+    <div class="features">
+      <div class="feature">
+        <svg width="18" height="18" viewBox="0 0 18 18" fill="none"><circle cx="9" cy="9" r="8" fill="#fff" fill-opacity=".16"/><path d="M5.5 9.2L7.8 11.5L12.5 6.8" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span class="feature__text">扫描 4 个 Runtime 目录，一次纳管去重</span>
+      </div>
+      <div class="feature">
+        <svg width="18" height="18" viewBox="0 0 18 18" fill="none"><circle cx="9" cy="9" r="8" fill="#fff" fill-opacity=".16"/><path d="M5.5 9.2L7.8 11.5L12.5 6.8" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span class="feature__text">漂移 7 态可见，绝不谎报同步</span>
+      </div>
+      <div class="feature">
+        <svg width="18" height="18" viewBox="0 0 18 18" fill="none"><circle cx="9" cy="9" r="8" fill="#fff" fill-opacity=".16"/><path d="M5.5 9.2L7.8 11.5L12.5 6.8" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span class="feature__text">CLI / daemon / MCP 三入口共用同一引擎</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="login-right">
+    <div class="login-form">
+      <div class="login-form__title">登录 Skill OS</div>
+      <div class="login-form__desc">控制台用于查看漂移矩阵与下发同步任务</div>
+
+      <div class="form-item">
+        <span class="form-item__label">邮箱</span>
+        <div class="field"><span class="field__value">banxian@skillos.dev</span></div>
+      </div>
+
+      <div class="form-item">
+        <span class="form-item__label">密码</span>
+        <div class="field"><span class="field__value">••••••••••••</span></div>
+      </div>
+
+      <button class="btn btn--lg btn--block btn--primary">登录</button>
+
+      <div class="login-form__tip">配对 daemon 需登录后在控制台生成 6 位配对码</div>
+    </div>
+  </div>
+
+</section>
+
+</div>
+</div>
+
+<script>
+(function(){
+  var stage = document.getElementById('stage');
+  var viewport = document.getElementById('viewport');
+  var switcher = document.getElementById('switcher');
+  var order = ['tokens','components','dashboard','detail','teams','login'];
+
+  function current(){
+    var el = stage.querySelector('.page.active');
+    return el ? el.dataset.page : null;
+  }
+
+  function fit(){
+    var k = Math.min(1, (window.innerWidth - 64) / 1440);
+    stage.style.transform = 'scale(' + k + ')';
+    viewport.style.width = (1440 * k) + 'px';
+    var el = stage.querySelector('.page.active');
+    viewport.style.height = el ? Math.round(el.offsetHeight * k) + 'px' : '0px';
+  }
+
+  function show(name){
+    if (order.indexOf(name) === -1) return;
+    var pages = stage.querySelectorAll('.page');
+    for (var i = 0; i < pages.length; i++){
+      pages[i].classList.toggle('active', pages[i].dataset.page === name);
+    }
+    var btns = switcher.querySelectorAll('button');
+    for (var j = 0; j < btns.length; j++){
+      btns[j].classList.toggle('active', btns[j].dataset.page === name);
+    }
+    try { history.replaceState(null, '', '#' + name); } catch (err) {}
+    syncNav(name);
+    fit();
+  }
+
+  function syncNav(name){
+    var navMap = {dashboard:'overview', detail:'skills', teams:'teams'};
+    var target = navMap[name];
+    var items = stage.querySelectorAll('.nav__item');
+    for (var i = 0; i < items.length; i++){
+      items[i].classList.toggle('active', !!target && items[i].dataset.nav === target);
+    }
+  }
+
+  switcher.addEventListener('click', function(e){
+    var b = e.target.closest('button');
+    if (b) show(b.dataset.page);
+  });
+
+  stage.addEventListener('click', function(e){
+    var nav = e.target.closest('.nav__item');
+    if (nav && nav.dataset.goto) { show(nav.dataset.goto); return; }
+    var tab = e.target.closest('.tab');
+    if (tab){
+      var group = tab.parentElement;
+      var tabs = group.querySelectorAll('.tab');
+      for (var i = 0; i < tabs.length; i++) tabs[i].classList.toggle('active', tabs[i] === tab);
+    }
+  });
+
+  document.addEventListener('keydown', function(e){
+    var i = order.indexOf(current());
+    if (e.key === 'ArrowRight') show(order[(i + 1) % order.length]);
+    if (e.key === 'ArrowLeft') show(order[(i - 1 + order.length) % order.length]);
+  });
+
+  window.addEventListener('resize', fit);
+  window.addEventListener('hashchange', function(){ show(location.hash.slice(1)); });
+  var boot = location.hash.slice(1);
+  show(order.indexOf(boot) !== -1 ? boot : 'dashboard');
+  window.addEventListener('load', fit);
+})();
+</script>
+</body>
+</html>

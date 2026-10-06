@@ -1,0 +1,2 @@
+# data/migrations/versions —— Alembic 迁移脚本目录
+# 首次生成：alembic revision --autogenerate -m "init schema"

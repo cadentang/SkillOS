@@ -1,0 +1,103 @@
+/* 设计令牌唯一来源：app/index.html 的 :root Design Tokens 段（04 §2.7.1）。
+   漂移 7 态色 + 形双编码，令牌名 --drift-* 不得改名、不得改色值。 */
+@import "tailwindcss";
+
+:root {
+  /* --- Color · Brand --- */
+  --primary: #2663eb;
+  --primary-hover: #1c4fd9;
+  --primary-soft: #f0f5ff;
+  --primary-border: #bfdbff;
+
+  /* --- Color · Neutral --- */
+  --canvas: #f5f7fa;
+  --surface: #ffffff;
+  --surface-alt: #fafafa;
+  --border: #e5e8eb;
+  --divider: #f0f2f2;
+  --text-primary: #0f1729;
+  --text-secondary: #5c6373;
+  --text-tertiary: #99a3b2;
+  --inverse: #ffffff;
+
+  /* --- Color · Semantic --- */
+  --success: #17a34a;
+  --warning: #f59e0a;
+  --danger: #db2626;
+  --info: #2663eb;
+
+  /* --- Color · Drift（产品视觉语言主体，色 + 形双编码） --- */
+  --drift-synced: #17a34a;
+  --drift-outdated: #2663eb;
+  --drift-modified: #f59e0a;
+  --drift-conflict: #db2626;
+  --drift-missing: #94a3b8;
+  --drift-unmanaged: #7d3bed;
+  --drift-orphaned: #475469;
+
+  /* --- Color · Badge --- */
+  --badge-adapter: #0ea5e9;
+
+  /* --- Size --- */
+  --radius-card: 12px;
+  --radius-control: 8px;
+  --radius-tag: 6px;
+  --radius-full: 999px;
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 16px;
+  --space-lg: 24px;
+  --space-xl: 32px;
+  --sidebar-w: 236px;
+  --topbar-h: 56px;
+  --row-h: 44px;
+
+  /* --- Type --- */
+  --font-display: 28px;
+  --font-h1: 22px;
+  --font-h2: 17px;
+  --font-h3: 15px;
+  --font-body: 14px;
+  --font-caption: 12px;
+  --font-mono: 13px;
+
+  --font-sans: Inter, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", system-ui, -apple-system,
+    "Segoe UI", sans-serif;
+  --font-code: "JetBrains Mono", "SF Mono", SFMono-Regular, Consolas, "Liberation Mono", monospace;
+
+  --shadow-pop: 0 1px 2px rgba(15, 23, 41, 0.04), 0 8px 24px -4px rgba(15, 23, 41, 0.08);
+}
+
+[data-theme="Dark"] {
+  --primary: #3b82f7;
+  --primary-hover: #61a6fa;
+  --primary-soft: #17243d;
+  --primary-border: #1f3b8a;
+  --canvas: #0a1221;
+  --surface: #121a29;
+  --surface-alt: #17212e;
+  --border: #242b3d;
+  --divider: #1c2433;
+  --text-primary: #e8edf2;
+  --text-secondary: #a1abba;
+  --text-tertiary: #6b7587;
+  --inverse: #0a1221;
+  --success: #21c45e;
+  --warning: #fabf24;
+  --danger: #f77070;
+  --drift-synced: #21c45e;
+  --drift-outdated: #3b82f7;
+  --drift-modified: #fabf24;
+  --drift-conflict: #f77070;
+  --drift-missing: #6b7587;
+  --drift-unmanaged: #a670fa;
+  --drift-orphaned: #808c9e;
+}
+
+body {
+  margin: 0;
+  background: var(--canvas);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--font-body);
+}
