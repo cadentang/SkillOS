@@ -302,15 +302,15 @@ class TaskExecutor:
         return "PUSH_FAILED"
 
     def _gate_summary(self) -> dict:
-        """ManagerPanel 门禁计数（FR-2.1.1 决策者读法）：每 skill 的 error / warn 数。"""
+        """ManagerPanel 门禁计数（FR-2.1.1 决策者读法）：每 skill 的 error / warn 数。
+
+        用 gate_all 批量入口：逐 skill gate_of 是 100+ 次 git spawn（20s+），
+        批量 2 次 spawn（亚秒）。
+        """
         from skillos.core.algorithm.checks import CheckLevel
 
         summary: dict[str, dict[str, int]] = {}
-        for slug in _all_slugs(self.engine):
-            try:
-                result = self.engine.gate_of(slug)
-            except Exception:  # noqa: BLE001 —— 单 skill 无 canonical 等不入统计
-                continue
+        for slug, result in self.engine.gate_all().items():
             errors = sum(1 for f in result.findings if f.level == CheckLevel.ERROR)
             warns = sum(1 for f in result.findings if f.level == CheckLevel.WARN)
             summary[slug] = {"errors": errors, "warns": warns}

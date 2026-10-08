@@ -325,6 +325,24 @@ class LocalEngine:
         snapshot = self.git.snapshot_at(self._head(), slug)
         return run_gate(snapshot, GateContext(known_slugs=self._all_slugs()))
 
+    def gate_all(self) -> dict[str, GateResult]:
+        """批量门禁（Dashboard gate-summary 专用）：一次批量快照跑全部 skill。
+
+        逐 skill 调 gate_of = 每 skill 一次 _head + 一次 ls-tree + 每文件
+        一次 git show（27 skill ≈ 100+ 次 spawn，Windows 20s+）；批量入口
+        = 2 次 spawn。语义与 gate_of 一致：canonical 缺失的 skill 跳过
+        （不入统计，由调用方决定如何呈现）。
+        """
+        known = self._all_slugs()
+        head = self._head()
+        try:
+            snapshots = self.git.snapshot_all(head)
+        except Exception:
+            return {}  # canonical 仓库异常：全空统计，doctor 会报
+        ctx = GateContext(known_slugs=known)
+        return {slug: run_gate(snap, ctx) for slug, snap in snapshots.items()
+                if slug in known}
+
     def push_skill(
         self,
         slug: str,
