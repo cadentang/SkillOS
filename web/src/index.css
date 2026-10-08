@@ -2,6 +2,17 @@
    漂移 7 态色 + 形双编码，令牌名 --drift-* 不得改名、不得改色值。 */
 @import "tailwindcss";
 
+/* Tailwind v4 间距工具类（mt-xs / p-lg / gap-md …）只认 @theme 的
+   --spacing-* 键；:root 里的 --space-* 只是运行时令牌，Tailwind 不读。
+   两处数值必须保持一致（改一处记得同步另一处）。 */
+@theme {
+  --spacing-xs: 4px;
+  --spacing-sm: 8px;
+  --spacing-md: 16px;
+  --spacing-lg: 24px;
+  --spacing-xl: 32px;
+}
+
 :root {
   /* --- Color · Brand --- */
   --primary: #2663eb;
