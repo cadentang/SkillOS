@@ -67,8 +67,10 @@ def _cached_cells(pairs) -> dict[str, dict[str, dict]]:
 async def _live_matrix(request: Request, user_id: str) -> list[dict] | None:
     """daemon 在线时取实时矩阵（含徽标）；离线返回 None（调用方降级缓存）。"""
     try:
+        # 90s：daemon 首次全扫（27 skill × git 子进程）在 Windows 上 25s+，
+        # 30s 太贴线——超时会被误判离线降级缓存（表现即"页面慢且数据旧"）
         result = await request.app.state.hub.submit_task(
-            user_id, "status", {}, timeout=30.0,
+            user_id, "status", {}, timeout=90.0,
         )
     except ConnectionError:
         return None

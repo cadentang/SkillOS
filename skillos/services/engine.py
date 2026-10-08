@@ -249,10 +249,16 @@ class LocalEngine:
         """四端漂移矩阵（FR-1.0.6）。「不适用」格子不进矩阵（04 §2.1.3）。"""
         out: list[DriftReport] = []
         adapters = {a.key: a for a in all_adapters()}
+        # HEAD 一次解析 + 全部快照一次批量取：逐 skill 调 snapshot_at 时
+        # 27 skill ≈ 100+ 次 git spawn（Windows 20s+），批量 = 2 次 spawn
+        head = self._head()
+        try:
+            snapshots = self.git.snapshot_all(head)
+        except Exception:
+            snapshots = {}  # canonical 仓库异常：全部按缺失处理，doctor 会报
         for row in self.db.list_skills(SkillQuery(limit=10000)):
-            try:
-                snapshot = self.git.snapshot_at(self._head(), row.slug)
-            except Exception:
+            snapshot = snapshots.get(row.slug)
+            if snapshot is None:
                 continue  # skill 行存在但 canonical 缺失：防御，doctor 会报
             for key, adapter in adapters.items():
                 binding = self.db.get_binding(row.id, key)

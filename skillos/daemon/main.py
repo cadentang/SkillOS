@@ -19,6 +19,8 @@ import os
 import platform
 import socket
 import sys
+import threading
+import time
 from collections import OrderedDict
 from pathlib import Path
 
@@ -373,27 +375,53 @@ def _all_slugs(engine) -> list[str]:
     return [r.slug for r in engine.db.list_skills(_all_query())]
 
 
-def _matrix_payload(engine: LocalEngine) -> list[dict]:
-    """矩阵载荷（status 任务 / drift_changed 事件共用）：含两类徽标（FR-1.0.19/20）。"""
-    cells = engine.status_matrix()
-    slug_by_id = {r.id: r.slug for r in engine.db.list_skills(_all_query())}
-    return [
-        {
-            "slug": slug_by_id.get(c.skill_id, c.skill_id),
-            "runtime_key": c.runtime_key,
-            "state": c.state.name if hasattr(c.state, "name") else str(c.state),
-            "name": slug_by_id.get(c.skill_id),
-            "installed_version": getattr(c, "installed_version", None),
-            "has_untracked_assets": bool(getattr(c, "has_untracked_assets", False)),
-            "adapter_outdated": bool(getattr(c, "adapter_outdated", False)),
-        }
-        for c in cells
-    ]
+# 矩阵缓存（status 任务高频，全扫秒级起步）：TTL 与周期上报间隔
+# REPORT_INTERVAL_S 对齐——周期上报每 60s 强刷一次缓存，status 任务
+# 在两次上报之间永远命中缓存秒回，不再自己串行跑 git 全扫。
+_MATRIX_TTL_S = float(REPORT_INTERVAL_S)
+_matrix_cache: dict = {"at": -1e9, "payload": []}
+# 全扫互斥：周期上报正在扫时，恰逢缓存过期的 status 不再并发开第二路
+# git 全扫（两路竞争会把 25s 拖成 31s+），排队等结果直接复用。
+_matrix_lock = threading.Lock()
 
 
-def drift_payload(engine: LocalEngine) -> list[dict]:
-    """构造 drift_changed 上报载荷（云端 upsert 的输入形状）。"""
-    return _matrix_payload(engine)
+def _matrix_payload(engine: LocalEngine, fresh: bool = False) -> list[dict]:
+    """矩阵载荷（status 任务 / drift_changed 事件共用）：含两类徽标（FR-1.0.19/20）。
+
+    fresh=True 强制全扫（写操作后/周期上报）；否则命中 TTL 内缓存。
+    锁内双重检查：等锁期间别的线程已刷完缓存则直接复用，不重复扫。
+    """
+    if not fresh and (time.monotonic() - _matrix_cache["at"]) < _MATRIX_TTL_S:
+        return _matrix_cache["payload"]
+    with _matrix_lock:
+        if not fresh and (time.monotonic() - _matrix_cache["at"]) < _MATRIX_TTL_S:
+            return _matrix_cache["payload"]
+        cells = engine.status_matrix()
+        slug_by_id = {r.id: r.slug for r in engine.db.list_skills(_all_query())}
+        payload = [
+            {
+                "slug": slug_by_id.get(c.skill_id, c.skill_id),
+                "runtime_key": c.runtime_key,
+                "state": c.state.name if hasattr(c.state, "name") else str(c.state),
+                "name": slug_by_id.get(c.skill_id),
+                "installed_version": getattr(c, "installed_version", None),
+                "has_untracked_assets": bool(getattr(c, "has_untracked_assets", False)),
+                "adapter_outdated": bool(getattr(c, "adapter_outdated", False)),
+            }
+            for c in cells
+        ]
+        _matrix_cache["at"] = time.monotonic()
+        _matrix_cache["payload"] = payload
+        return payload
+
+
+def drift_payload(engine: LocalEngine, fresh: bool = True) -> list[dict]:
+    """构造 drift_changed 上报载荷（云端 upsert 的输入形状）。
+
+    事件上报语义是"我刚扫过/刚写完，这是最新状态"，默认强制刷新
+    （fresh=True）——顺带把缓存换成最新的，status 任务随后秒回。
+    """
+    return _matrix_payload(engine, fresh=fresh)
 
 
 def check_environment(home: Path) -> list[str]:
@@ -481,11 +509,16 @@ async def run(cloud_url: str, pair_code: str | None = None,
                     sys.exit(1)
                 backoff = 1.0
 
-                # 连接即上报一次漂移（FR-1.2.6）
+                # 连接即上报一次漂移（FR-1.2.6）。
+                # 全扫是重活（git 子进程 × N + 全量 hash，秒级~分钟级），
+                # 必须放线程池：同步阻塞事件循环会卡死 websockets 的
+                # ping/pong（默认 20s 间隔），40s 后客户端自判死链断开
+                # → 重连 → 再全扫 → 重连风暴（徽标永远闪断的根因）。
+                payload = await asyncio.to_thread(drift_payload, engine)
                 await ws.send(json.dumps({
                     "type": "event", "event": "drift_changed",
                     "user_id": user_id,
-                    "payload": {"matrix": drift_payload(engine)},
+                    "payload": {"matrix": payload},
                 }))
 
                 async def heartbeat() -> None:  # noqa: B023 —— ws 由外层 with 管理生命周期
@@ -496,10 +529,12 @@ async def run(cloud_url: str, pair_code: str | None = None,
                 async def periodic_report(uid: str | None = user_id) -> None:
                     while True:
                         await asyncio.sleep(REPORT_INTERVAL_S)
+                        # 同上：全扫放线程池，不阻塞事件循环（ping/pong 生命线）
+                        p = await asyncio.to_thread(drift_payload, engine)
                         await ws.send(json.dumps({
                             "type": "event", "event": "drift_changed",
                             "user_id": uid,
-                            "payload": {"matrix": drift_payload(engine)},
+                            "payload": {"matrix": p},
                         }))
 
                 hb = asyncio.create_task(heartbeat())
@@ -527,7 +562,10 @@ async def run(cloud_url: str, pair_code: str | None = None,
                                 log.info("重复任务跳过（request_id=%s）", request_id)
                                 continue
                             executor.dedup.mark(request_id, msg.get("task_id"))
-                            result = executor.execute(
+                            # 任务执行（scan/status/push 都是重活）放线程池：
+                            # status 全扫秒级起步，同步跑会卡死 ping/pong 断链
+                            result = await asyncio.to_thread(
+                                executor.execute,
                                 msg.get("op"), msg.get("params") or {},
                             )
                             payload = {
@@ -542,10 +580,11 @@ async def run(cloud_url: str, pair_code: str | None = None,
                             # 注意此处不能用 TaskExecutor.WRITE_OPS（那是"executor 层
                             # 需补锁"的集合）；这里要的是"产生写入"的集合。
                             if msg.get("op") in {"push", "rollback", "pull", "tag_create"}:
+                                p2 = await asyncio.to_thread(drift_payload, engine)
                                 await ws.send(json.dumps({
                                     "type": "event", "event": "drift_changed",
                                     "user_id": user_id,
-                                    "payload": {"matrix": drift_payload(engine)},
+                                    "payload": {"matrix": p2},
                                 }))
                 finally:
                     hb.cancel()

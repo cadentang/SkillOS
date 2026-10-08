@@ -73,9 +73,14 @@ class GitRepo:
                 cmd, cwd=self.repo_root, capture_output=True, check=False,
                 # 隔离 stdin：MCP stdio 场景下防 git 读取/阻塞 JSON-RPC 管道
                 stdin=subprocess.DEVNULL,
+                # 超时兜底：git 卡死（杀毒/锁）不能拖垮调用方——daemon 的
+                # 全扫在循环里跑，单次无界等待 = 整条链路假死
+                timeout=30,
             )
         except FileNotFoundError as e:
             raise GitError("git not found in PATH") from e
+        except subprocess.TimeoutExpired as e:
+            raise GitError(f"git {' '.join(args)} timed out after 30s") from e
         if proc.returncode != 0:
             raise GitError(f"git {' '.join(args)} failed: {proc.stderr.decode(errors='replace')}")
         return proc
@@ -168,6 +173,76 @@ class GitRepo:
             # 此分支仅覆盖"从未通过 gate 的历史快照"（只读路径，不参与渲染）。
             meta = SkillMeta(name="", description="")
         return SkillSnapshot(skill_id=slug, slug=slug, meta=meta, files=tuple(files))
+
+    def snapshot_all(self, commit: str) -> dict[str, SkillSnapshot]:
+        """取某一 commit 下**全部** Skill 快照 —— status_matrix 专用批量入口。
+
+        对比逐 skill 调 snapshot_at：N skill × M 文本文件 = N×(1+M) 次 git
+        spawn（27 skill ≈ 100+ 次，Windows 上 20s+）；批量 = 1 次 ls-tree +
+        1 次 cat-file --batch（2 次 spawn）。语义与 snapshot_at 一致：
+        缺 SKILL.md 的 skill 给占位空 meta（gate 报 error，不炸扫描）。
+        """
+        proc = self._git("ls-tree", "-r", commit, "--", SKILLS_DIR)
+        entries: list[tuple[str, str, str]] = []  # (blob_sha, slug, inner_path)
+        prefix = f"{SKILLS_DIR}/"
+        for ln in proc.stdout.decode("utf-8", errors="replace").splitlines():
+            if not ln.strip():
+                continue
+            meta_part, _, path = ln.partition("\t")
+            parts = meta_part.split()
+            if len(parts) < 3 or parts[1] != "blob" or not path.startswith(prefix):
+                continue
+            rest = path[len(prefix):]
+            slug, sep, inner = rest.partition("/")
+            if not sep:  # skills/ 直下无文件，只有目录
+                continue
+            entries.append((parts[2], slug, inner))
+        if not entries:
+            return {}
+
+        # cat-file --batch：去重后一次进程取回全部 blob
+        shas = list(dict.fromkeys(sha for sha, _, _ in entries))
+        batch = subprocess.run(  # noqa: S603 —— 参数固定白名单（cat-file --batch）
+            ["git", *GIT_BASE_ARGS, "cat-file", "--batch"],
+            cwd=self.repo_root, input=("\n".join(shas) + "\n").encode(),
+            capture_output=True, check=False, timeout=120,
+        )
+        if batch.returncode != 0:
+            raise GitError(f"git cat-file --batch failed: "
+                           f"{batch.stderr.decode(errors='replace')}")
+        contents: dict[str, bytes] = {}
+        data, pos = batch.stdout, 0
+        for sha in shas:
+            nl = data.find(b"\n", pos)
+            if nl < 0:
+                raise GitError(f"cat-file --batch 输出截断（{sha}）")
+            header = data[pos:nl].decode("utf-8", errors="replace").split()
+            pos = nl + 1
+            if len(header) < 3:  # "<sha> missing"：HEAD 下不该发生，防御
+                contents[sha] = b""
+                continue
+            size = int(header[2])
+            contents[sha] = data[pos:pos + size]
+            pos += size + 1  # 内容后有一个换行
+
+        by_slug: dict[str, list[FileEntry]] = {}
+        meta_by_slug: dict[str, SkillMeta | None] = {}
+        for sha, slug, inner in entries:
+            content = contents[sha]
+            by_slug.setdefault(slug, []).append(
+                FileEntry(path=inner, content=content, in_git=True,
+                          is_text=is_foldable_text(content))
+            )
+            if inner == "SKILL.md":
+                meta_by_slug[slug] = _build_meta(content)
+        out: dict[str, SkillSnapshot] = {}
+        for slug, files in by_slug.items():
+            meta = meta_by_slug.get(slug)
+            if meta is None:
+                meta = SkillMeta(name="", description="")
+            out[slug] = SkillSnapshot(skill_id=slug, slug=slug, meta=meta,
+                                     files=tuple(files))
+        return out
 
     def diff(self, base: str, head: str, path: str | None = None) -> str:
         """unified diff 文本。二进制文件第一版只显示「已变更」（T5）。"""
