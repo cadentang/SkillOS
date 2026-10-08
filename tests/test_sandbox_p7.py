@@ -261,8 +261,9 @@ class TestDoctorProvenanceIdentity:
         monkeypatch.setenv("GIT_CONFIG_SYSTEM", str(empty))
 
     def test_warns_when_git_identity_missing(self, tmp_path, monkeypatch) -> None:
-        from skillos.cli.doctor import run_doctor
         from rich.console import Console
+
+        from skillos.cli.doctor import run_doctor
 
         home = tmp_path / "root"
         monkeypatch.setenv("SKILLOS_ROOT", str(home))
@@ -278,8 +279,9 @@ class TestDoctorProvenanceIdentity:
     def test_ok_when_git_identity_set(self, tmp_path, monkeypatch) -> None:
         import subprocess
 
-        from skillos.cli.doctor import run_doctor
         from rich.console import Console
+
+        from skillos.cli.doctor import run_doctor
 
         home = tmp_path / "root"
         monkeypatch.setenv("SKILLOS_ROOT", str(home))

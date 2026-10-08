@@ -48,7 +48,7 @@ from skillos.core.fs.importer import ImportPlan, plan_import
 from skillos.core.fs.safe_path import path_key, safe_path
 from skillos.core.fs.scan import scan_roots
 from skillos.core.fs.version import GitError, GitRepo
-from skillos.core.model import DriftReport, DriftState, RootSpec
+from skillos.core.model import DriftReport, DriftState, RootSpec, SkillSnapshot
 from skillos.services.locking import write_lock
 from skillos.store.db import init_schema, make_engine, make_session_factory, sqlite_url
 from skillos.store.index_repo import SkillQuery, SkillRecord, SqliteIndexStore
@@ -886,7 +886,7 @@ class LocalEngine:
                 "removed": removed,
             }
 
-    # ------------------------------------------------ CONFLICT 四选一（P3，FR-2.2.6 / T22 / RED LINE 12）
+    # ------------------------------------------ CONFLICT 四选一（P3，FR-2.2.6 / T22 / RL 12）
     def resolve_conflict(
         self,
         slug: str,
@@ -1236,4 +1236,4 @@ def _render_skill_md(name: str, description: str) -> bytes:
         f"description: {fm_desc}\n"
         "---\n"
         f"\n# {name}\n\n在 Web 或编辑器中补充正文。\n"
-    ).encode("utf-8")
+    ).encode()

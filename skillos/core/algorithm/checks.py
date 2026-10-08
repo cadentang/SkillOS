@@ -118,8 +118,8 @@ def _body_of(files) -> str:
 
 
 def summarize_health(
-    findings: "Iterable[RuleFinding | Mapping[str, str]]",
-    decay: "Mapping[str, object] | None" = None,
+    findings: Iterable[RuleFinding | Mapping[str, str]],
+    decay: Mapping[str, object] | None = None,
 ) -> dict:
     """健康度汇总（FR-1.0.24 退化形态：门禁结果计数，砍单第 8 项）。
 

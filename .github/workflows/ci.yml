@@ -31,3 +31,45 @@ jobs:
       - name: Test (pytest)
         # 07 A6：Windows 列必须含并发锁用例（后续补充，串行用例先行）
         run: pytest tests -q
+
+  web:
+    # 前端构建不进 pytest 矩阵 —— 但它是容器 A 托管 SPA 的**唯一**产物来源。
+    # 只在发版 workflow 编译的坑（上游 N28）同样适用于前端：构建失败必须在这里暴露。
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install
+        working-directory: web
+        run: npm ci
+      - name: Build (tsc -b && vite build)
+        working-directory: web
+        run: npm run build
+      - name: Upload dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+          retention-days: 3
+
+  docker:
+    # 镜像构建是最晚才被发现的那一类故障（缺文件 / CMD 指向不存在的 app /
+    # 前端层不被 npm ci 认识）。构建期就能失败，就不要拖到部署机上。
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t skillos:ci .
+      - name: Smoke (容器内 ASGI 可导入 + SPA 已就位)
+        run: |
+          docker run --rm skillos:ci python -c "
+          import os, pathlib
+          from skillos.api.asgi import app
+          d = os.environ['SKILLOS_WEB_DIST']
+          assert pathlib.Path(d, 'index.html').is_file(), f'SPA 未就位: {d}'
+          assert app is not None
+          print('asgi ok, web_dist ok:', d)"

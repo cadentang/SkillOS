@@ -33,6 +33,7 @@ Skill OS —— 个人 AI Skill 操作系统。本地 Git 仓库是 canonical（
 | 5 | `docs/03-开发排期.md` | 需要确认当前阶段与验收口径时 |
 | 6 | `docs/06` / `docs/07` | 想改某个"看起来多余"的约束时 —— **先查它是不是踩坑换来的**（18 项采纳 + 30 条坑，多数带上游 issue 号） |
 | 7 | `app/index.html`、`Skill OS 设计系统.pdf` | 动前端 UI / 颜色 / 组件样式时 |
+| 8 | `docs/09-部署手册.md` | 改 `Dockerfile` / `compose.yaml` / API 入口 / 静态托管 / 环境变量 / 沙盒入口脚本时 |
 
 **裁决顺序（文档冲突时）**
 

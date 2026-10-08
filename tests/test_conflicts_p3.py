@@ -211,8 +211,9 @@ def test_mcp_sync_pull_signature_has_no_keep_both():
 
 def test_engine_resolve_conflict_requires_decision_enum_only():
     """决策枚举是封闭的；非法值直接 ValueError。"""
-    from skillos.services.engine import LocalEngine
     import inspect
+
+    from skillos.services.engine import LocalEngine
 
     # resolve_conflict 必须存在（实现完成）
     assert hasattr(LocalEngine, "resolve_conflict")

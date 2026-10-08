@@ -56,7 +56,10 @@ class TestCreateSkill:
         """模板必须产出可解析的 frontmatter（含中文 description 的 YAML 安全转义）。"""
         engine, _ = env
         engine.init_env()
-        engine.create_skill("brand-new", name="Brand New", description="一个全新的技能描述，包含冒号: 与引号\"的混排")
+        engine.create_skill(
+            "brand-new", name="Brand New",
+            description="一个全新的技能描述，包含冒号: 与引号\"的混排",
+        )
         snap = engine.git.snapshot_at(engine._head(), "brand-new")
         assert snap.meta.name == "Brand New"
         assert "冒号" in (snap.meta.description or "")

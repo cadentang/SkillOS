@@ -163,8 +163,10 @@ def import_(
 def add(
     slug: str = typer.Argument(..., help="新 Skill 的 slug（kebab-case）"),
     name: str = typer.Option("", "--name", help="显示名（缺省=slug）"),
-    description: str = typer.Option(..., "--description", "-d",
-                                    help="一句话描述（必填：fm.description.required 为 error 级门禁）"),
+    description: str = typer.Option(
+        ..., "--description", "-d",
+        help="一句话描述（必填：fm.description.required 为 error 级门禁）",
+    ),
     json_output: bool = typer.Option(False, "--json"),
     repo: str = typer.Option(None, "--repo", help="canonical 仓库路径"),
 ) -> None:
@@ -179,7 +181,7 @@ def add(
         )
     except SkillValidationError as e:
         console.print(f"[red]✗ {e}[/red]")
-        raise typer.Exit(EXIT_FAIL)
+        raise typer.Exit(EXIT_FAIL) from None
     if json_output:
         console.print_json(json.dumps(result, ensure_ascii=False))
         return
@@ -209,7 +211,7 @@ def rm_(
         preview = engine.delete_skill(slug, dry_run=True)
     except SkillValidationError as e:
         console.print(f"[red]✗ {e}[/red]")
-        raise typer.Exit(EXIT_FAIL)
+        raise typer.Exit(EXIT_FAIL) from None
     if not preview.get("ok"):
         console.print(f"[red]✗ {preview.get('error_code')}: {preview.get('detail')}[/red]")
         for p in preview.get("removals") or []:
@@ -226,7 +228,7 @@ def rm_(
         result = engine.delete_skill(slug, dry_run=False, confirmed_removals=removals)
     except SkillValidationError as e:
         console.print(f"[red]✗ {e}[/red]")
-        raise typer.Exit(EXIT_FAIL)
+        raise typer.Exit(EXIT_FAIL) from None
     if not result.get("ok"):
         console.print(f"[red]✗ {result.get('error_code')}: {result.get('detail')}[/red]")
         raise typer.Exit(EXIT_FAIL)
@@ -427,7 +429,7 @@ def check(
 
 @app.command()
 def doctor() -> None:
-    """环境自检（FR-1.1.8）：9 项检查逐项返回 ok/warn/fail，见 04 §2.5.1 表。"""
+    """环境自检（FR-1.1.8）：10 项检查逐项返回 ok/warn/fail，见 04 §2.5.1 表。"""
     from skillos.cli.doctor import run_doctor
 
     failures = run_doctor(console)

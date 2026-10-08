@@ -16,11 +16,8 @@ import logging
 import os
 import secrets
 
-from pathlib import Path
-
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 
 from skillos.api.routes import (
     auth,
@@ -36,6 +33,7 @@ from skillos.api.routes import (
 )
 from skillos.api.routes import sandbox as sandbox_routes
 from skillos.api.security import hash_token, new_agent_token
+from skillos.api.web import mount_web
 from skillos.api.ws_hub import AgentConn, WsHub
 from skillos.store.cloud_repo import CloudRepo
 from skillos.store.db import init_schema, make_engine, make_session_factory
@@ -100,12 +98,6 @@ def create_app(db_url: str | None = None, jwt_secret: str | None = None,
     @app.get("/api/health")
     def health() -> dict:
         return {"ok": True, "data": {"status": "up", "sandbox": sandbox}, "error": None}
-
-    # 线上部署托管 Web 静态文件（04 §1.4 容器 A；开发态走 vite 5173 不挂载）。
-    # SPA fallback 到 index.html（前端路由 /skills/:slug 等刷新不 404）。
-    web_dist = os.environ.get("SKILLOS_WEB_DIST")
-    if web_dist and Path(web_dist).is_dir():
-        app.mount("/", StaticFiles(directory=web_dist, html=True), name="web")
 
     @app.websocket("/ws/agent")
     async def ws_agent(ws: WebSocket) -> None:
@@ -239,6 +231,11 @@ def create_app(db_url: str | None = None, jwt_secret: str | None = None,
             pass
         finally:
             app.state.hub.unregister_ui(ws)
+
+    # 静态托管必须放在**所有路由之后**（04 §1.4 容器 A；开发态 vite 5173 不挂载）。
+    # Mount("/") 对空路径匹配所有 http/websocket scope，排前面会吞掉 /ws/*
+    # —— 顺序即语义，见 skillos/api/web.py 与 tests/test_web_hosting.py。
+    mount_web(app)
 
     return app
 

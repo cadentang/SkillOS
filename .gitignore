@@ -22,6 +22,7 @@ web/tsconfig.tsbuildinfo
 
 # AI 辅助工具的项目级数据（计划/会话状态，非交付物）
 .codebuddy/
+.workbuddy/memory/
 
 # 本地环境与凭据（NFR-2：token 禁止入项目目录）
 .env
