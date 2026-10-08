@@ -11,7 +11,7 @@ services:
   cloud:
     build: .
     ports:
-      - "8000:8000"
+      - "9080:9080"
     environment:
       SKILLOS_DB_URL: sqlite:////data/cloud.db
       # 生产必须显式设置：docker compose 时用 .env 注入，缺省为进程随机值
@@ -20,7 +20,7 @@ services:
       - cloud-data:/data
     healthcheck:
       test: ["CMD", "python", "-c",
-             "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/api/health')"]
+             "import urllib.request;urllib.request.urlopen('http://127.0.0.1:9080/api/health')"]
       interval: 5s
       timeout: 3s
       retries: 12
@@ -33,8 +33,8 @@ services:
     environment:
       SKILLOS_SANDBOX: "1"
       SKILLOS_ROOT: /runtime
-      SKILLOS_CLOUD_HTTP: http://cloud:8000
-      SKILLOS_CLOUD_WS: ws://cloud:8000/ws/agent
+      SKILLOS_CLOUD_HTTP: http://cloud:9080
+      SKILLOS_CLOUD_WS: ws://cloud:9080/ws/agent
     volumes:
       - sandbox-data:/runtime
     entrypoint: ["/bin/sh", "/app/sandbox/entrypoint-sandbox.sh"]

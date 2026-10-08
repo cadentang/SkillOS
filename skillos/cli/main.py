@@ -447,7 +447,7 @@ def devices(
 
 @app.command()
 def daemon(
-    cloud: str = typer.Option("ws://127.0.0.1:8000/ws/agent", "--cloud",
+    cloud: str = typer.Option("ws://127.0.0.1:9080/ws/agent", "--cloud",
                              help="云端 WS URL"),
     pair: str = typer.Option(None, "--pair", help="6 位配对码"),
 ) -> None:

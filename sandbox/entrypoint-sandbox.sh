@@ -6,8 +6,8 @@
 set -e
 
 : "${SKILLOS_ROOT:=/runtime}"
-: "${SKILLOS_CLOUD_HTTP:=http://cloud:8000}"
-: "${SKILLOS_CLOUD_WS:=ws://cloud:8000/ws/agent}"
+: "${SKILLOS_CLOUD_HTTP:=http://cloud:9080}"
+: "${SKILLOS_CLOUD_WS:=ws://cloud:9080/ws/agent}"
 export SKILLOS_ROOT SKILLOS_SANDBOX=1
 
 echo "[sandbox] install-seed (idempotent)"

@@ -568,7 +568,7 @@ def main(cloud_url: str | None = None, pair_code: str | None = None) -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
-    url = cloud_url or "ws://127.0.0.1:8000/ws/agent"
+    url = cloud_url or "ws://127.0.0.1:9080/ws/agent"
     asyncio.run(run(url, pair_code))
 
 

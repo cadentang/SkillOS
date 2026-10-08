@@ -34,6 +34,6 @@ RUN python scripts/build_sandbox_seed.py /seed
 ENV SKILLOS_WEB_DIST=/app/web_dist \
     PYTHONUNBUFFERED=1
 
-EXPOSE 8000
+EXPOSE 9080
 # 入口必须用 asgi（main.py 只导出 create_app 工厂，没有模块级 app）。
-CMD ["uvicorn", "skillos.api.asgi:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "skillos.api.asgi:app", "--host", "0.0.0.0", "--port", "9080"]
