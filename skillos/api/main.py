@@ -122,7 +122,12 @@ def create_app(db_url: str | None = None, jwt_secret: str | None = None,
         pair_code = str(hello.get("pair_code") or "")
         platform_ = str(hello.get("platform") or "") or None
 
-        repo = CloudRepo(app.state.session_factory())
+        # Session 生命周期必须与 WS 连接解耦：daemon 连接是小时级长连接，
+        # Session 挂在连接上会在首次查询后永久占住一个池连接；认证失败
+        # 路径（deny / 异常）不 commit 也不 close → 连接泄漏，QueuePool
+        # 5+10 被 daemon 重连循环打满后，所有 hello 排队 30s 超时。
+        session = app.state.session_factory()
+        repo = CloudRepo(session)
         conn: AgentConn | None = None
         try:
             if token:
@@ -192,7 +197,7 @@ def create_app(db_url: str | None = None, jwt_secret: str | None = None,
                             continue
                         await app.state.hub.handle_result(req_id, msg)
                     elif mtype == "event":
-                        await _handle_event(app, repo, msg)
+                        await _handle_event(app, msg)
                     else:
                         await ws.send_json({
                             "type": "error",
@@ -210,6 +215,10 @@ def create_app(db_url: str | None = None, jwt_secret: str | None = None,
                 await ws.close(code=1011)
             except Exception:  # noqa: BLE001
                 pass
+        finally:
+            # 覆盖全部退出路径（deny / 异常 / 断连）确定性归还池连接。
+            # close 幂等；detach 后 tok 的已加载属性仍可读（expire_on_commit=False）。
+            session.close()
 
     @app.websocket("/ws/ui")
     async def ws_ui(ws: WebSocket) -> None:
@@ -252,12 +261,18 @@ async def _recv_json(ws: WebSocket, timeout: float | None) -> dict:
 
 
 async def _deny(ws: WebSocket, code: str, message: str) -> None:
+    # 服务端必须留痕：deny 静默会让"秒开秒关循环"无从排查（只看到连接关了）
+    log.info("agent 握手被拒: %s - %s", code, message)
     await ws.send_json({"type": "error", "error": {"code": code, "message": message}})
     await ws.close(code=4003, reason=code)
 
 
-async def _handle_event(app: FastAPI, repo: CloudRepo, msg: dict) -> None:
-    """daemon 事件：drift_changed → upsert 漂移矩阵 + UI 广播（FR-1.2.6）。"""
+async def _handle_event(app: FastAPI, msg: dict) -> None:
+    """daemon 事件：drift_changed → upsert 漂移矩阵 + UI 广播（FR-1.2.6）。
+
+    每次事件新开短会话：认证会话已随注册关闭，长连接期间不能有
+    Session 挂住池连接（见 ws_agent 内注释）。
+    """
     event = msg.get("event")
     payload = msg.get("payload") or {}
     if event != "drift_changed":
@@ -265,10 +280,12 @@ async def _handle_event(app: FastAPI, repo: CloudRepo, msg: dict) -> None:
     user_id = msg.get("user_id") or ""
     if not user_id:
         return
-    repo.upsert_matrix(user_id, payload.get("matrix") or [])
     from skillos.store.cloud_repo import drift_summary
 
-    summary = drift_summary(repo.list_bindings(user_id))
+    with app.state.session_factory() as session:
+        repo = CloudRepo(session)
+        repo.upsert_matrix(user_id, payload.get("matrix") or [])
+        summary = drift_summary(repo.list_bindings(user_id))
     await app.state.hub.broadcast_ui({
         "type": "drift_changed", "summary": summary,
     }, user_id=user_id)

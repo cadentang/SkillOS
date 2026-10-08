@@ -25,6 +25,7 @@ from collections import OrderedDict
 from pathlib import Path
 
 import websockets
+from filelock import FileLock, Timeout
 
 from skillos.core.constants import LOCK_TIMEOUT_S, WS_BACKOFF_MAX_S, WS_TASK_OPS
 from skillos.services.engine import (
@@ -442,6 +443,35 @@ def token_path(home: Path) -> Path:
     return home / ".skillos" / "token"
 
 
+def acquire_instance_lock(home: Path) -> FileLock:
+    """本机单实例守卫：同一 home（同一台机器/沙盒）只允许一个 daemon 进程。
+
+    为什么云端 4001 踢不够：踢 → 落败方按普通断连重连 → 反踢回去，
+    两个实例互踢成重连风暴（还会把云端 Session 池打满）。必须在源头
+    不让第二个实例起来。filelock 与写锁同款（services/locking，禁
+    fcntl / msvcrt）；进程退出（含崩溃）由 OS 自动释放，无孤儿锁。
+    锁文件写 pid（filelock 默认行为），报错时读出来方便定位旧进程。
+    """
+    lock_dir = home / ".skillos"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock = FileLock(str(lock_dir / "daemon.lock"), timeout=1)
+    try:
+        lock.acquire()
+    except Timeout:
+        holder = ""
+        try:
+            holder = (lock_dir / "daemon.lock").read_text(encoding="utf-8").strip()
+        except OSError:
+            pass
+        log.error(
+            "本机已有 daemon 实例在运行%s，拒绝启动第二实例。"
+            "如需重启，请先停止旧进程（pid 见 ~/.skillos/daemon.lock）。",
+            f"（pid {holder}）" if holder else "",
+        )
+        sys.exit(1)
+    return lock
+
+
 def load_token(home: Path) -> str | None:
     p = token_path(home)
     if not p.exists():
@@ -469,6 +499,9 @@ async def run(cloud_url: str, pair_code: str | None = None,
         for p in problems:
             log.error("环境校验失败: %s", p)
         sys.exit(1)
+
+    # 单实例锁必须持满进程生命周期（变量只作持有引用，故下划线开头）
+    _instance_lock = acquire_instance_lock(home)
 
     engine = LocalEngine(default_env(home), home=home)
     executor = TaskExecutor(engine)
@@ -589,8 +622,17 @@ async def run(cloud_url: str, pair_code: str | None = None,
                 finally:
                     hb.cancel()
                     rep.cancel()
+        except websockets.ConnectionClosed as e:
+            # 4001 = 同 agent_id 新连接接管（FR-1.2.7）。退出而非重连：
+            # 两个实例会互踢（踢→1s 重连→踢回），形成重连风暴 + 池连接泄漏。
+            if e.rcvd is not None and e.rcvd.code == 4001:
+                log.error("被同 agent_id 的新连接接管（4001）——"
+                          "是否启动了第二个 daemon 实例？本实例退出。")
+                sys.exit(1)
+            log.warning("连接断开（%s），%ss 后重连", type(e).__name__, backoff)
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, WS_BACKOFF_MAX_S)
         except (
-            websockets.ConnectionClosed,
             ConnectionRefusedError,
             OSError,
             TimeoutError,
