@@ -8,7 +8,7 @@ install-seed
     （重启容器不重置评委的体验现场，重置只走 reset 接口）。
 
 pair
-    登录 demo 用户 → POST /api/auth/pairing/code → 打印 6 位码。
+    登录 demo 用户 → POST /api/pairing/code → 打印 6 位码。
     daemon 用它完成首次配对；token 落盘后重启不再需要。
 """
 
@@ -22,7 +22,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-DEMO_EMAIL = "demo@skillos.local"
+DEMO_EMAIL = "demo@skillos.dev"  # .local 是 special-use 保留域，EmailStr 校验直接 422
 DEMO_PASSWORD = "skillos-demo"
 
 
@@ -88,7 +88,7 @@ def _pair(cloud: str, email: str, password: str) -> None:
     data = _http(cloud, "POST", "/api/auth/login",
                  {"email": email, "password": password})
     token = data["data"]["token"]
-    data = _http(cloud, "POST", "/api/auth/pairing/code", {}, token=token)
+    data = _http(cloud, "POST", "/api/pairing/code", {}, token=token)
     print(data["data"]["code"])
 
 

@@ -17,7 +17,7 @@ scan / push / pull / 编辑 / 回滚全部可用（04 §2.7.7）。
 ```sh
 echo "SKILLOS_JWT_SECRET=$(openssl rand -hex 32)" > .env
 docker compose up -d --build
-# 评委入口: http://<host>:9080（demo@skillos.local / skillos-demo）
+# 评委入口: http://<host>:9080（demo@skillos.dev / skillos-demo）
 # 沙盒 daemon 连 cloud 容器，所有写操作落在 sandbox-data 卷内
 ```
 
