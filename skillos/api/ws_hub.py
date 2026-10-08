@@ -40,6 +40,7 @@ class AgentConn:
 class PendingTask:
     request_id: str
     task_id: str
+    user_id: str  # task_done 按 user 定向广播（不跨用户泄漏进度）
     op: str
     params: dict
     future: asyncio.Future
@@ -59,7 +60,9 @@ class WsHub:
         self.pending: dict[str, PendingTask] = {}
         # 已消费 request_id 去重（重连补发场景）
         self._consumed: dict[str, float] = {}
-        self.ui_conns: set[WebSocket] = set()
+        # UI 连接：ws → user_id（daemon_status / task_done / drift_changed
+        # 都是用户维度的状态，跨用户广播会把 A 的 daemon 在线态点亮到 B 的徽标）
+        self.ui_conns: dict[WebSocket, str] = {}
         self._lock = asyncio.Lock()
 
     # ---------------------------------------------------------------- agent 通道
@@ -75,7 +78,8 @@ class WsHub:
             except Exception:  # noqa: BLE001 —— 关闭已死连接属常态
                 pass
         await self.broadcast_ui({"type": "daemon_status", "connected": True,
-                                 "agent_id": conn.agent_id})
+                                 "agent_id": conn.agent_id},
+                                user_id=conn.user_id)
         return old
 
     async def unregister_agent(self, conn: AgentConn) -> None:
@@ -92,7 +96,8 @@ class WsHub:
                         })
                         del self.pending[req_id]
         await self.broadcast_ui({"type": "daemon_status", "connected": False,
-                                 "agent_id": conn.agent_id})
+                                 "agent_id": conn.agent_id},
+                                user_id=conn.user_id)
 
     def agent_online(self, user_id: str) -> bool:
         return any(a.user_id == user_id for a in self.agents.values())
@@ -116,7 +121,7 @@ class WsHub:
         await self.broadcast_ui({
             "type": "task_done", "task_id": task.task_id,
             "summary": {"ok": bool(payload.get("ok"))},
-        })
+        }, user_id=task.user_id)
 
     # ---------------------------------------------------------------- 任务下发
 
@@ -139,7 +144,8 @@ class WsHub:
         future: asyncio.Future = asyncio.get_running_loop().create_future()
         async with self._lock:
             self.pending[request_id] = PendingTask(
-                request_id=request_id, task_id=task_id, op=op, params=params, future=future,
+                request_id=request_id, task_id=task_id, user_id=user_id,
+                op=op, params=params, future=future,
             )
         try:
             await agent.ws.send_json({
@@ -154,16 +160,26 @@ class WsHub:
 
     # ---------------------------------------------------------------- UI 通道
 
-    async def register_ui(self, ws: WebSocket) -> None:
-        self.ui_conns.add(ws)
+    async def register_ui(self, ws: WebSocket, user_id: str) -> None:
+        """注册 UI 连接 + **立即补发 daemon 状态快照**（FR-2.1.5）。
+
+        没有快照的时序 bug：daemon 先连上（daemon_status 广播时 UI 还没连），
+        再打开页面 → 徽标永远停在初始 offline，直到 daemon 下次断连/重连。
+        """
+        self.ui_conns[ws] = user_id
+        await ws.send_json({"type": "daemon_status",
+                            "connected": self.agent_online(user_id)})
 
     def unregister_ui(self, ws: WebSocket) -> None:
-        self.ui_conns.discard(ws)
+        self.ui_conns.pop(ws, None)
 
-    async def broadcast_ui(self, msg: dict) -> None:
-        """UI 广播。单连接失败不影响其余（推送尽力而为，前端靠 Query 失效兜底）。"""
-        for ws in list(self.ui_conns):
+    async def broadcast_ui(self, msg: dict, user_id: str | None = None) -> None:
+        """UI 广播。user_id 非空时只发给该用户的连接（用户维度状态不跨户）。
+        单连接失败不影响其余（推送尽力而为，前端靠 Query 失效兜底）。"""
+        for ws, uid in list(self.ui_conns.items()):
+            if user_id is not None and uid != user_id:
+                continue
             try:
                 await ws.send_json(msg)
             except Exception:  # noqa: BLE001
-                self.ui_conns.discard(ws)
+                self.ui_conns.pop(ws, None)

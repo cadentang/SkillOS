@@ -222,7 +222,7 @@ def create_app(db_url: str | None = None, jwt_secret: str | None = None,
             await ws.close(code=4001, reason="unauthorized")
             return
         await ws.accept()
-        await app.state.hub.register_ui(ws)
+        await app.state.hub.register_ui(ws, user_id)
         try:
             while True:
                 # UI → 云端暂无上行消息；保活靠心跳帧（客户端 ping）
@@ -271,4 +271,4 @@ async def _handle_event(app: FastAPI, repo: CloudRepo, msg: dict) -> None:
     summary = drift_summary(repo.list_bindings(user_id))
     await app.state.hub.broadcast_ui({
         "type": "drift_changed", "summary": summary,
-    })
+    }, user_id=user_id)

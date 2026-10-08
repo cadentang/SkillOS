@@ -246,6 +246,53 @@ class TestWsTaskRoundtrip:
 
         asyncio.run(scenario())
 
+    def test_ui_register_gets_status_snapshot(self):
+        """FR-2.1.5 回归：daemon 先连、UI 后连，注册即收到 daemon_status 快照。
+
+        时序 bug：daemon_status 只在 agent 注册/断连瞬间广播；UI 晚于 daemon
+        连接时若无快照，徽标永远停在初始 offline（配对成功但页面显示离线）。
+        同时验证快照按 user 维度：u1 的 daemon 不能点亮 u2 的徽标。
+        """
+        import asyncio
+
+        from skillos.api.ws_hub import AgentConn, WsHub
+
+        class FakeWs:
+            def __init__(self) -> None:
+                self.sent: list[dict] = []
+
+            async def send_json(self, msg: dict) -> None:
+                self.sent.append(msg)
+
+            async def close(self, **_kw) -> None:
+                pass
+
+        async def scenario() -> None:
+            hub = WsHub()
+            # ① daemon(u1) 先连 —— 此时没有任何 UI 连接，广播落空
+            agent_ws = FakeWs()
+            await hub.register_agent(AgentConn(
+                ws=agent_ws, agent_id="a1", user_id="u1", token_id="t1"))
+
+            # ② UI(u1) 后连 —— 必须立即拿到 connected=true 快照
+            ui1 = FakeWs()
+            await hub.register_ui(ui1, "u1")  # type: ignore[arg-type]
+            assert ui1.sent[0]["type"] == "daemon_status"
+            assert ui1.sent[0]["connected"] is True
+
+            # ③ UI(u2) 连 —— u1 的 daemon 不影响 u2（按 user 快照）
+            ui2 = FakeWs()
+            await hub.register_ui(ui2, "u2")  # type: ignore[arg-type]
+            assert ui2.sent[0]["connected"] is False
+
+            # ④ daemon 断连：只有 u1 的 UI 收到下线广播，u2 不受扰
+            await hub.unregister_agent(hub.agents["a1"])
+            types1 = [m["type"] for m in ui1.sent]
+            assert "daemon_status" in types1
+            assert all(m.get("type") != "daemon_status" for m in ui2.sent[1:])
+
+        asyncio.run(scenario())
+
     def test_drift_event_upserts_and_aggregates(self, client, engine_home):
         """daemon drift_changed → 云端 upsert → GET /sync/status 按 Skill 聚合。"""
         engine, _ = engine_home

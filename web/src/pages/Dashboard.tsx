@@ -38,11 +38,15 @@ export default function Dashboard() {
   const drift = useQuery({
     queryKey: ["drift"],
     queryFn: endpoints.driftStatus,
+    // 兜底轮询：与 daemon 周期上报 REPORT_INTERVAL_S=60s 对齐；
+    // 实时性靠 WS drift_changed 事件失效，不靠拉高轮询频率
+    refetchInterval: 60_000,
   });
   const gate = useQuery({
     queryKey: ["gate"],
     queryFn: endpoints.gateSummary,
     retry: false, // daemon 离线时 503 属预期，不重试
+    refetchInterval: 60_000, // 同 drift：事件驱动为主，60s 兜底
   });
   const health = useQuery({
     queryKey: ["health"],
