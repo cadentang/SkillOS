@@ -1,0 +1,44 @@
+# Skill OS 线上部署（04 §1.4 两容器拓扑）
+#
+#   cloud    FastAPI（REST + WS Hub）+ 托管 Web 静态文件 —— 评委访问入口
+#   sandbox  同一镜像，SKILLOS_SANDBOX=1：daemon 连 cloud，root 全在容器内
+#            （可写隔离，评委经 Web 下发的所有写操作都发生在沙盒容器里）
+#
+# 启动：docker compose up -d --build
+# 验证：docker compose exec sandbox skillos doctor
+
+services:
+  cloud:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      SKILLOS_DB_URL: sqlite:////data/cloud.db
+      # 生产必须显式设置：docker compose 时用 .env 注入，缺省为进程随机值
+      SKILLOS_JWT_SECRET: ${SKILLOS_JWT_SECRET:?需要 SKILLOS_JWT_SECRET（.env）}
+    volumes:
+      - cloud-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/api/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  sandbox:
+    build: .
+    depends_on:
+      cloud:
+        condition: service_healthy
+    environment:
+      SKILLOS_SANDBOX: "1"
+      SKILLOS_ROOT: /runtime
+      SKILLOS_CLOUD_HTTP: http://cloud:8000
+      SKILLOS_CLOUD_WS: ws://cloud:8000/ws/agent
+    volumes:
+      - sandbox-data:/runtime
+    entrypoint: ["/bin/sh", "/app/sandbox/entrypoint-sandbox.sh"]
+
+volumes:
+  cloud-data:
+  sandbox-data:

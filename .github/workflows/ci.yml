@@ -1,0 +1,33 @@
+# P0 欠账补齐（03 §2 P0 / 05 P0-10 / 07 N28）：CI 矩阵从第一天就接上。
+# 坑：上游"Linux 只在发版 workflow 编译"导致平台差异拖到发版才暴露 —— 我们只有 18 天，承受不起。
+# macOS 列按排期在发版前手动跑一次（03 §8.3），不进矩阵。
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  pytest:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+        python-version: ["3.11", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Lint (ruff)
+        run: ruff check skillos tests
+      - name: Test (pytest)
+        # 07 A6：Windows 列必须含并发锁用例（后续补充，串行用例先行）
+        run: pytest tests -q

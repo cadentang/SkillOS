@@ -1,0 +1,34 @@
+# Skill OS 镜像 —— 云端（容器 A）与沙盒（容器 B）共用，仅环境变量切换（04 §1.4）：
+#   SKILLOS_SANDBOX=1  沙盒可写隔离演示模式（FR-2.4.3）
+#   SKILLOS_ROOT       runtime/repo 根指向容器内虚拟目录（T1）
+
+# ---- Web 构建层 ----
+FROM node:20-slim AS web
+WORKDIR /web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+COPY web/ ./
+RUN npm run build
+
+# ---- 运行层 ----
+FROM python:3.12-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+
+COPY pyproject.toml ./
+COPY skillos/ ./skillos/
+COPY scripts/ ./scripts/
+COPY sandbox/ ./sandbox/
+RUN pip install --no-cache-dir .
+
+COPY --from=web /web/dist ./web_dist
+
+# seed 预置演示数据（构建期生成；sandbox_bootstrap install-seed 负责落位）
+RUN python scripts/build_sandbox_seed.py /seed
+
+ENV SKILLOS_WEB_DIST=/app/web_dist
+
+EXPOSE 8000
+CMD ["uvicorn", "skillos.api.main:app", "--host", "0.0.0.0", "--port", "8000"]

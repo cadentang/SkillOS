@@ -16,7 +16,9 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from skillos.core.model import Commit, SkillSnapshot
+from skillos.core.algorithm.hash import is_foldable_text
+from skillos.core.algorithm.parse import build_meta, parse_frontmatter
+from skillos.core.model import Commit, FileEntry, SkillMeta, SkillSnapshot
 
 # 05 P0-1：显式覆盖用户全局 git 配置，保证行为可预期
 GIT_BASE_ARGS: tuple[str, ...] = (
@@ -26,13 +28,35 @@ GIT_BASE_ARGS: tuple[str, ...] = (
     "core.safecrlf=false",
     "-c",
     "core.quotepath=false",  # 中文文件名正常显示，否则是八进制乱码
+    "-c",
+    "core.longpaths=true",  # Windows 260 字符路径上限
 )
 
 DEFAULT_AUTHOR = "Skill OS <skillos@local>"
 
+# canonical 仓库布局：skills/<slug>/...
+SKILLS_DIR = "skills"
+
 
 class GitError(Exception):
     """git 调用失败（非零退出码 / git 不存在）。"""
+
+
+def _parse_author(author: str) -> tuple[str, str]:
+    """"Name <email>" → (name, email)；无尖括号时整体作 name。"""
+    if "<" in author and author.endswith(">"):
+        name, _, email = author.partition("<")
+        return name.strip(), email[:-1].strip()
+    return author.strip(), "skillos@local"
+
+
+def _build_meta(content: bytes):
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    fm, _body = parse_frontmatter(text)
+    return build_meta(fm) if fm else None
 
 
 class GitRepo:
@@ -46,7 +70,9 @@ class GitRepo:
         cmd = ["git", *GIT_BASE_ARGS, *args]
         try:
             proc = subprocess.run(  # noqa: S603 —— 参数白名单由具名方法约束（OUT-14）
-                cmd, cwd=self.repo_root, capture_output=True, check=False
+                cmd, cwd=self.repo_root, capture_output=True, check=False,
+                # 隔离 stdin：MCP stdio 场景下防 git 读取/阻塞 JSON-RPC 管道
+                stdin=subprocess.DEVNULL,
             )
         except FileNotFoundError as e:
             raise GitError("git not found in PATH") from e
@@ -57,32 +83,169 @@ class GitRepo:
     # ---- 具名方法（新增能力加具名方法，禁止加通用透传）----
 
     def init(self) -> None:
-        """git init + 写 repo 级配置（不动全局，05 P2-5）。"""
-        raise NotImplementedError("P1 实现")
+        """git init（07 G1/G2）：显式 -b main --ref-format=files，不吃用户全局配置。
+
+        旧版 git 不支持时逐级降级（-b → symbolic-ref），保证初始分支仍为 main。
+        """
+        try:
+            self._git("init", "-b", "main", "--ref-format=files")
+        except GitError:
+            try:
+                self._git("init", "-b", "main")
+            except GitError:
+                self._git("init")
+                self._git("symbolic-ref", "HEAD", "refs/heads/main")
+        self._git("config", "core.autocrlf", "false")  # repo 级兜底（05 P2-5）
+        # 分发备份落 <repo>/.skillos/backups/（不随 git 版本化）；
+        # rollback 的 add -A 会扫全树，没有 .gitignore 会把备份提交进仓库
+        gitignore = Path(self.repo_root) / ".gitignore"
+        lines = gitignore.read_text(encoding="utf-8").splitlines() if gitignore.exists() else []
+        if ".skillos/backups/" not in lines:
+            lines.append(".skillos/backups/")
+            gitignore.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     def commit(self, paths: list[str], message: str, author: str = DEFAULT_AUTHOR) -> str:
         """提交指定路径，返回 commit sha。"""
-        raise NotImplementedError("P1 实现")
+        name, email = _parse_author(author)
+        self._git("add", "--", *paths)
+        self._git(
+            "-c", f"user.name={name}", "-c", f"user.email={email}",
+            "commit", "-m", message,
+        )
+        return self._git("rev-parse", "HEAD").stdout.decode().strip()
 
-    def log(self, path: str | None = None, limit: int = 20) -> list[Commit]:
-        """提交历史（可按路径过滤）。"""
-        raise NotImplementedError("P1 实现")
+    def log(self, path: str | None = None, limit: int = 20,
+            follow: bool = False) -> list[Commit]:
+        """提交历史（可按路径过滤；follow 跨改名追踪单文件 —— P4 文件级历史）。"""
+        fmt = "%H%x00%an%x00%aI%x00%B%x00%x1e"
+        args = ["log", f"--pretty=format:{fmt}", "-n", str(limit)]
+        if follow and path:
+            args.append("--follow")
+        if path:
+            args += ["--", path]
+        out = self._git(*args).stdout.decode("utf-8", errors="replace")
+        commits: list[Commit] = []
+        for record in out.split("\x1e"):
+            record = record.strip("\n")
+            if not record.strip():
+                continue
+            parts = record.split("\x00", 3)
+            if len(parts) != 4:
+                continue
+            sha, author, at, message = parts
+            # 尾部 \x00：fmt 中 %B 与记录分隔符 %x1e 之间的 %x00 会残留在 message 末尾
+            commits.append(Commit(sha=sha, message=message.strip("\n\x00"),
+                                  author=author, at=at))
+        return commits
 
     def show(self, commit: str, path: str) -> bytes:
-        """取某 commit 下某文件的字节内容。"""
-        raise NotImplementedError("P1 实现")
+        """取某 commit 下某文件的字节内容（autocrlf=false：字节级不变）。"""
+        return self._git("show", f"{commit}:{path}").stdout
 
-    def snapshot_at(self, commit: str) -> SkillSnapshot:
-        """取某一 commit 的完整 canonical 快照 —— base 重建的唯一入口（NFR-3.5）。
+    def snapshot_at(self, commit: str, slug: str) -> SkillSnapshot:
+        """取某一 commit 下某 Skill 的 canonical 快照 —— base 重建的唯一入口（NFR-3.5）。
 
         base 不落盘，靠 render(canonical@installed_commit, installed_adapter_version) 现算（T6）。
         """
-        raise NotImplementedError("P1 实现")
+        prefix = f"{SKILLS_DIR}/{slug}/"
+        proc = self._git("ls-tree", "-r", "--name-only", commit, "--", prefix)
+        rel_paths = [ln for ln in proc.stdout.decode("utf-8").splitlines() if ln]
+        files: list[FileEntry] = []
+        meta: SkillMeta | None = None
+        for rel in rel_paths:
+            content = self.show(commit, rel)
+            inner = rel[len(prefix):]
+            if inner == "SKILL.md":
+                meta = _build_meta(content)
+            files.append(
+                FileEntry(
+                    path=inner, content=content, in_git=True, is_text=is_foldable_text(content)
+                )
+            )
+        if meta is None:
+            # frontmatter 结构非法（缺 name/description）：占位空 meta，由 gate
+            # 的 fm.*.required 报 error。base 重建只发生在通过 gate 的快照上，
+            # 此分支仅覆盖"从未通过 gate 的历史快照"（只读路径，不参与渲染）。
+            meta = SkillMeta(name="", description="")
+        return SkillSnapshot(skill_id=slug, slug=slug, meta=meta, files=tuple(files))
 
     def diff(self, base: str, head: str, path: str | None = None) -> str:
         """unified diff 文本。二进制文件第一版只显示「已变更」（T5）。"""
-        raise NotImplementedError("P1 实现")
+        args = ["diff", base, head]
+        if path:
+            args += ["--", path]
+        return self._git(*args).stdout.decode("utf-8", errors="replace")
 
-    def rollback(self, commit: str, paths: list[str]) -> str:
-        """git checkout <commit> -- <paths> 后提交新 commit，不重写历史。"""
-        raise NotImplementedError("P1 实现")
+    def resolve_ref(self, ref: str) -> str:
+        """解析 ref（分支/tag）为 commit sha。"""
+        return self._git("rev-parse", f"{ref}^{{commit}}").stdout.decode().strip()
+
+    def create_tag(self, name: str, message: str, commit: str = "HEAD") -> None:
+        """建附注 tag（P4）。tag 名合法性交给 git 判定，失败抛 GitError。"""
+        self._git(
+            "-c", "user.name=Skill OS", "-c", "user.email=skillos@local",
+            "tag", "-a", name, "-m", message, commit,
+        )
+
+    def list_tags(self) -> list[dict]:
+        """tag 清单（name + 所指 commit sha），时间轴徽标数据源。
+
+        附注 tag 的 objectname 是 tag 对象本身，须取解引用的 %(*objectname)；
+        轻量 tag 无解引用值，回退 objectname（即 commit）。
+        """
+        fmt = "%(refname:short)%00%(*objectname)%00%(objectname)"
+        out = self._git("tag", f"--format={fmt}", "--sort=-creatordate").stdout
+        tags: list[dict] = []
+        for line in out.decode("utf-8", errors="replace").splitlines():
+            if not line.strip():
+                continue
+            name, deref, direct = (line.split("\x00") + [""])[:3]
+            tags.append({"name": name, "sha": deref or direct})
+        return tags
+
+    def rollback(self, commit: str, paths: list[str],
+                 author: str = "Skill OS <skillos@local>") -> str:
+        """先自动建安全快照（含未提交改动），再 checkout <commit> -- <paths> 并提交新 commit。
+
+        不重写历史（07 N23）：回滚本身也是破坏性操作，快照用户可见、可再回滚。
+        回滚 commit 即溯源记录（FR-1.0.22）：author + 目标版本写进 git 历史，不可篡改。
+
+        坑（实测）：`git checkout <commit> -- <path>` 只会**恢复/覆盖**目标版本中存在的
+        文件，HEAD 有而目标没有的文件纹丝不动 → 回滚后残留新版本文件。必须显式
+        `git rm` 掉目标版本中不存在的路径，回滚才是完整一致状态。
+        """
+        # 1. 安全快照：把当前工作区全部状态（含 dirty）先存下来
+        self._git("add", "-A")
+        status = self._git("status", "--porcelain").stdout
+        if status.strip():
+            self._git(
+                "-c", "user.name=Skill OS", "-c", "user.email=skillos@local",
+                "commit", "-m", "skillos: snapshot before rollback",
+            )
+        # 2. 计算回滚要删除的文件（HEAD 有、目标没有），显式 rm
+        for pathspec in paths:
+            head_files = self._ls_tree_files("HEAD", pathspec)
+            tgt_files = self._ls_tree_files(commit, pathspec)
+            doomed = head_files - tgt_files
+            if doomed:
+                self._git("rm", "-f", "--", *sorted(doomed))
+        # 3. checkout 旧版本路径 + 新 commit（不 rewrite history）
+        self._git("checkout", commit, "--", *paths)
+        self._git("add", "--", *paths)
+        staged = self._git("status", "--porcelain").stdout
+        if not staged.strip():
+            # 目标与当前一致：不产生空 commit，直接返回 HEAD
+            return self._git("rev-parse", "HEAD").stdout.decode().strip()
+        name, email = _parse_author(author)
+        self._git(
+            "-c", f"user.name={name}", "-c", f"user.email={email}",
+            "commit", "-m", f"skillos: rollback {', '.join(paths)} to {commit}",
+        )
+        return self._git("rev-parse", "HEAD").stdout.decode().strip()
+
+    def _ls_tree_files(self, ref: str, pathspec: str) -> set[str]:
+        """列 ref 下 pathspec 内的受控文件路径（回滚删除集计算用）。"""
+        out = self._git(
+            "ls-tree", "-r", "--name-only", "-z", ref, "--", pathspec,
+        ).stdout.decode("utf-8", errors="replace")
+        return {p for p in out.split("\x00") if p}

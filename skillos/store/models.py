@@ -7,16 +7,16 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import (
+    JSON,
     Boolean,
     CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
     Integer,
-    JSON,
     Text,
     UniqueConstraint,
 )
@@ -24,7 +24,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 class Base(DeclarativeBase):
@@ -316,15 +316,23 @@ class SkillSimilarity(Base):
 
 
 class ChangeRequest(Base):
+    """协作 CR（FR-2.3.3 / FR-3.7 / FR-3.16）。
+
+    - CR 自身 + CrComment 表即为审计源；**应用层不提供改写 / 删除接口**（FR-3.16）。
+    - 状态机：open → closed（reviewer 驳回）/ merged（owner 合并）；merged 后写回
+      canonical 的 `head_version`，触发下一阶段团队 binding push。
+    """
+
     __tablename__ = "change_requests"
     __table_args__ = (
         CheckConstraint("status IN ('open','merged','closed')", name="ck_cr_status"),
     )
 
     id: Mapped[str] = mapped_column(Text, primary_key=True)
+    team_id: Mapped[str] = mapped_column(ForeignKey("teams.id"), nullable=False)
     skill_id: Mapped[str] = mapped_column(ForeignKey("skills.id"), nullable=False)
-    base_version: Mapped[str | None] = mapped_column(Text)
-    head_version: Mapped[str | None] = mapped_column(Text)
+    base_version: Mapped[str | None] = mapped_column(Text)  # 展示用：基线版本号
+    target_commit: Mapped[str | None] = mapped_column(Text)  # git commit：合并的最终事实
     title: Mapped[str] = mapped_column(Text, nullable=False)
     body: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(Text, nullable=False, default="open")

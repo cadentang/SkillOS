@@ -12,9 +12,9 @@ Runtime 目录，只在 daemon 内加锁等于「daemon push 时终端敲 skillo
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
 
 from filelock import FileLock, Timeout
 

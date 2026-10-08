@@ -3,43 +3,24 @@
 判定分两步：归属判定（三事实）→ 内容三方比对（渲染后空间）。
 本模块保持纯函数：哈希计算与状态判定不碰磁盘、不碰 git；
 磁盘 / git 的事实由 core/fs 与 services 层取回后传入。
+
+哈希两级结构在 core/algorithm/hash.py（T16）：第一级字节级绝不归一化，
+第二级 compare_normalized 仅作"仅风格差异"提示，不参与状态判定。
 """
 
 from __future__ import annotations
 
-import hashlib
-
+from skillos.core.algorithm.hash import aggregate_entries, aggregate_hash, hash_bytes
 from skillos.core.model import DriftState
 
-
-# ---------------------------------------------------------------- 哈希口径
-
-
-def normalize_bytes(content: bytes) -> bytes:
-    """换行归一化 \\r\\n → \\n。
-
-    04 §2.1.3：Windows/Linux 混合场景不归一化会误报（P0，见 05 P0-1）。
-    """
-    return content.replace(b"\r\n", b"\n")
-
-
-def hash_bytes(content: bytes) -> str:
-    """单文件内容哈希（先做换行归一化）。"""
-    return hashlib.sha256(normalize_bytes(content)).hexdigest()
-
-
-def aggregate_hash(files: dict[str, bytes]) -> str:
-    """目录级哈希：sha256(path + "\\0" + sha256(content)) 的排序后聚合。
-
-    - 路径统一 POSIX 分隔符（05 P2-3）
-    - 内容先换行归一化（\\r\\n → \\n）
-    - 排序保证与遍历顺序无关（纯函数前提，NFR-3.5）
-    """
-    digests = []
-    for p in sorted(files):
-        posix = p.replace("\\", "/")
-        digests.append(f"{posix}\0{hash_bytes(files[p])}")
-    return hashlib.sha256("\n".join(digests).encode("utf-8")).hexdigest()
+__all__ = [
+    "aggregate_entries",
+    "aggregate_hash",
+    "hash_bytes",
+    "classify",
+    "classify_imported",
+    "classify_ownership",
+]
 
 
 # ---------------------------------------------------------------- 状态判定

@@ -2,14 +2,31 @@
 
 字段策略：version / agent_created 均 keep。
 额外产出 sidecar `agents/openai.yaml`（本机 30 个 Skill 带此文件，04 §2.1.2）。
+路径全部在 paths 数据里（FR-1.0.25）。
 """
 
 from __future__ import annotations
 
-from pathlib import Path
+from datetime import date
 
-from skillos.core.algorithm.adapters.base import RuntimeAdapter
-from skillos.core.model import SkillMeta, SkillSnapshot
+from skillos.core.algorithm.adapters.base import PathSpec, RuntimeAdapter, RuntimePaths
+from skillos.core.model import SkillMeta
+
+_VERIFIED = date(2026, 10, 6)
+
+
+def _paths() -> dict[str, RuntimePaths]:
+    # 本机实测（2026-10-07）：skill 在 {home}/.agents/skills 子目录下，不是 .agents 根
+    return {
+        "user": RuntimePaths(
+            deploy_dir=PathSpec("builtin:agents", "user", "{home}/.agents/skills", "builtin"),
+            verified_at=_VERIFIED,
+        ),
+        "project": RuntimePaths(
+            deploy_dir=PathSpec("builtin:agents", "project", "{project}/.agents/skills", "builtin"),
+            verified_at=_VERIFIED,
+        ),
+    }
 
 
 class AgentsAdapter(RuntimeAdapter):
@@ -24,12 +41,7 @@ class AgentsAdapter(RuntimeAdapter):
         "agent_created": "keep",
         "origin": "drop",
     }
-
-    def resolve_root(self, scope: str, project_dir: Path | None) -> Path:
-        if scope == "project":
-            assert project_dir is not None, "project scope 需要 project_dir"
-            return project_dir / ".agents"
-        return Path.home() / ".agents"
+    paths = _paths()
 
     def frontmatter_in(self, raw: dict) -> SkillMeta:
         return SkillMeta(
@@ -54,6 +66,3 @@ class AgentsAdapter(RuntimeAdapter):
                 "  allow_implicit_invocation: true\n"
             )
         }
-
-    def render_layout(self, snapshot: SkillSnapshot) -> dict[str, bytes]:
-        raise NotImplementedError("P1 实现：渲染 SKILL.md + openai.yaml sidecar，纯函数（T6/T7）")

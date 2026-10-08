@@ -73,9 +73,18 @@ class TestOwnership:
 
 
 class TestHash:
-    def test_crlf_normalized(self):
-        """04 §2.1.3：换行归一化，Windows/Linux 混合不误报。"""
-        assert hash_bytes(b"a\r\nb\r\n") == hash_bytes(b"a\nb\n")
+    def test_crlf_byte_level(self):
+        """T16 / 07 D6 / 06 B1：哈希第一级字节级、绝不归一化。
+        坑（变异验证）：旧口径"归一化后进哈希"会让"两端来回互推"成为常态 ——
+        把实现改回归一化，本断言必须变红。
+        """
+        assert hash_bytes(b"a\r\nb\r\n") != hash_bytes(b"a\nb\n")
+
+    def test_style_only_hint_via_second_level(self):
+        """第二级只作提示：CRLF/LF 差异报告为"仅风格差异"，但不改变 hash 判定。"""
+        from skillos.core.algorithm.hash import compare_normalized
+
+        assert compare_normalized(b"a\r\nb\r\n", b"a\nb\n") is True
 
     def test_aggregate_order_independent(self):
         a = aggregate_hash({"x.md": b"1", "y.md": b"2"})

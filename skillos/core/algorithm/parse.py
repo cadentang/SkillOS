@@ -46,8 +46,8 @@ _CANONICAL_FIELDS = frozenset(
 )
 
 
-def _build_meta(fm: dict[str, Any]) -> SkillMeta | None:
-    """从 frontmatter dict 构造 SkillMeta；缺 name/description 的仍可解析（由 checks 报 error）。"""
+def build_meta(fm: dict[str, Any]) -> SkillMeta | None:
+    """frontmatter dict → SkillMeta；缺 name/description 的仍可解析（由 checks 报 error）。"""
     if not isinstance(fm.get("name"), str) or not isinstance(fm.get("description"), str):
         # 结构非法：交给 checks 层报 fm.name.required / fm.description.required
         return None
@@ -72,7 +72,7 @@ def parse_skill(
     sidecars: 相对路径 → 文本内容（如 agents/openai.yaml），未识别字段原样保留。
     """
     fm, _body = parse_frontmatter(skill_md)
-    meta = _build_meta(fm) if fm else None
+    meta = build_meta(fm) if fm else None
 
     out: list[SkillFile] = []
     for f in files:

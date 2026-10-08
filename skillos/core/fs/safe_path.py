@@ -14,6 +14,7 @@ MCP 工具参数、CLI 参数）必须先过这一个函数，不得各自拼接
 from __future__ import annotations
 
 import re
+import unicodedata
 from pathlib import Path
 
 _ERROR_CODE = "PATH_TRAVERSAL"
@@ -74,3 +75,15 @@ def safe_path(root: Path, rel: str) -> Path:
     if not target.is_relative_to(base):
         raise PathTraversalError(rel, "escapes root")
     return target
+
+
+def path_key(rel: str) -> str:
+    """路径键归一化（FR-1.0.31 / 04 §2.2.0-10 / 06 A7）。
+
+    按分隔符分段，逐段 NFC + casefold，用于"两个路径是否同一个"的比较。
+    坑：macOS 写盘即 NFD 化、Windows 大小写不敏感 —— 只比大小写会漏掉
+    中文 / 组合字符场景（本机 62 个 Skill 全中文名）。
+    注意：key 只用于比较，不得替换用户可见的真实路径。
+    """
+    parts = [unicodedata.normalize("NFC", p).casefold() for p in re.split(r"[\\/]+", rel) if p]
+    return "/".join(parts)

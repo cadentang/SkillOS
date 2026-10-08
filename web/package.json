@@ -10,7 +10,9 @@
     "gen:api": "openapi-typescript http://127.0.0.1:8000/openapi.json -o src/api/schema.d.ts"
   },
   "dependencies": {
+    "@monaco-editor/react": "^4.7.0",
     "@tanstack/react-query": "^5.51.0",
+    "monaco-editor": "^0.57.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-router-dom": "^6.26.0"

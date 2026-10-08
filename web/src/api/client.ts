@@ -2,6 +2,20 @@
  *  后端契约变更后：gen:api → 看 TS 报错 → 修调用点。
  *  schema.d.ts 生成前本文件不得引用其类型（当前为初始化阶段）。 */
 
+const TOKEN_KEY = "skillos_token";
+
+export const tokenStore = {
+  get(): string | null {
+    return localStorage.getItem(TOKEN_KEY);
+  },
+  set(token: string) {
+    localStorage.setItem(TOKEN_KEY, token);
+  },
+  clear() {
+    localStorage.removeItem(TOKEN_KEY);
+  },
+};
+
 export class ApiError extends Error {
   constructor(
     public readonly code: string,
@@ -17,21 +31,30 @@ export class ApiError extends Error {
 interface Envelope<T> {
   ok: boolean;
   data: T | null;
-  error: { code: string; message: string; detail?: unknown } | null;
+  error: { code: string; message: string; held_back_removals?: string[] } | null;
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, {
-    headers: { "Content-Type": "application/json", ...init?.headers },
-    ...init,
-  });
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...(init?.headers as Record<string, string> | undefined),
+  };
+  const token = tokenStore.get();
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  const res = await fetch(path, { ...init, headers });
   const body = (await res.json()) as Envelope<T>;
   if (!res.ok || !body.ok) {
+    // 401：token 失效 → 清除并回登录页（FR-2.4.1 AuthGate）
+    if (res.status === 401) {
+      tokenStore.clear();
+      if (window.location.pathname !== "/login") window.location.href = "/login";
+    }
     throw new ApiError(
       body.error?.code ?? "INTERNAL",
       body.error?.message ?? res.statusText,
       res.status,
-      body.error?.detail,
+      body.error,
     );
   }
   return body.data as T;
@@ -39,8 +62,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   get: <T>(path: string) => request<T>(path),
-  post: <T>(path: string, data: unknown) =>
-    request<T>(path, { method: "POST", body: JSON.stringify(data) }),
+  post: <T>(path: string, data?: unknown) =>
+    request<T>(path, { method: "POST", body: JSON.stringify(data ?? {}) }),
   put: <T>(path: string, data: unknown) =>
     request<T>(path, { method: "PUT", body: JSON.stringify(data) }),
   patch: <T>(path: string, data: unknown) =>

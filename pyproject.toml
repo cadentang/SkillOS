@@ -29,6 +29,8 @@ dependencies = [
     # daemon WS 客户端 / 上游 URL 检查
     "websockets>=12.0",
     "httpx>=0.27",
+    # 云端认证（T4：JWT）
+    "pyjwt>=2.8",
 ]
 
 [project.optional-dependencies]
@@ -39,6 +41,7 @@ dev = [
 
 [project.scripts]
 skillos = "skillos.cli.main:app"
+skillos-mcp = "skillos.mcp.server:main"
 
 [tool.setuptools.packages.find]
 include = ["skillos*"]
@@ -52,3 +55,5 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+# B008：Typer 的 Option/Argument 放默认参数位是官方惯用法
+ignore = ["B008"]
