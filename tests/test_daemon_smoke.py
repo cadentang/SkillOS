@@ -157,6 +157,56 @@ class TestDaemonOpsSmoke:
         assert not r["ok"]
         assert r["error"]["code"] == "INVALID_INPUT"
 
+    def test_runtime_sync_custom_matrix_columns(self, engine_home):
+        """FR-1.0.34 / T25: custom Runtime 同步后进漂移矩阵列.
+
+        云端同步 custom:trae（root 指向 fixture 建的 skill 目录）→
+        status_matrix 出现 custom:trae 列；sync 空列表 → 列消失.
+        这是"Trae 没显示在矩阵"的回归守护.
+        """
+        import pathlib
+
+        engine, home = engine_home
+        ex = TaskExecutor(engine)
+
+        trae_root = pathlib.Path(home) / "trae-skills"
+        demo_dir = trae_root / "demo"
+        demo_dir.mkdir(parents=True, exist_ok=True)
+        (demo_dir / "SKILL.md").write_text(
+            "---\nname: demo\ndescription: demo\n---\nbody\n", "utf-8",
+        )
+
+        # 同步 1 条 custom
+        r = ex.execute("runtime_sync_custom", {
+            "items": [{"key": "custom:trae", "root_path": str(trae_root)}],
+        })
+        assert r["ok"], r
+        assert r["data"] == {"synced": 1, "removed": 0}
+
+        # 矩阵出现 custom:trae 列
+        rt_keys = {c.runtime_key for c in engine.status_matrix()}
+        assert "custom:trae" in rt_keys, f"矩阵缺 custom:trae: {rt_keys}"
+
+        # 全量对齐为空 → 列消失（云端已删）
+        r2 = ex.execute("runtime_sync_custom", {"items": []})
+        assert r2["ok"], r2
+        assert r2["data"] == {"synced": 0, "removed": 1}
+        rt_keys2 = {c.runtime_key for c in engine.status_matrix()}
+        assert "custom:trae" not in rt_keys2
+
+    def test_runtime_sync_custom_rejects_bad_key(self, engine_home):
+        """T25 / FR-1.0.25: 非 custom: 命名空间 / 缺字段必须 INVALID_INPUT."""
+        engine, _ = engine_home
+        ex = TaskExecutor(engine)
+        r = ex.execute("runtime_sync_custom", {
+            "items": [{"key": "claude", "root_path": "/x"}],  # 冒充 builtin
+        })
+        assert not r["ok"]
+        assert r["error"]["code"] == "INVALID_INPUT"
+        r2 = ex.execute("runtime_sync_custom", {"items": [{"key": "custom:x"}]})
+        assert not r2["ok"]
+        assert r2["error"]["code"] == "INVALID_INPUT"
+
     def test_runtime_diagnose_by_key_builtin(self, engine_home):
         """FR-1.0.33 / FR-2.4.10: builtin key 诊断走 adapter 约定路径（T12）.
 

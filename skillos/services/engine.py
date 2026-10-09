@@ -184,14 +184,84 @@ class LocalEngine:
             r.key for r in self.db.list_runtimes() if not r.enabled
         }
 
+    def _custom_adapters(self) -> list[RuntimeAdapter]:
+        """云端同步下来的 custom Runtime（FR-1.0.34 / T25）。
+
+        本地 SQLite runtimes 表里 adapter_key 不在 builtin 注册表的行 =
+        custom。discover_only 的 custom 由云端同步时直接不下发（T25 红线：
+        discover_only = 只发现不管理，不进矩阵不进分发）。
+        """
+        from skillos.core.algorithm.adapters.custom import CustomRuntimeAdapter
+
+        builtin_keys = {a.key for a in all_adapters()}
+        out: list[RuntimeAdapter] = []
+        for r in self.db.list_runtimes():
+            if r.adapter_key in builtin_keys:
+                continue
+            try:
+                out.append(CustomRuntimeAdapter(r.key, r.root_path))
+            except ValueError:
+                continue  # 行损坏（key 不带 custom: 前缀）：防御，doctor 会报
+        return out
+
     def _enabled_adapters(self) -> list[RuntimeAdapter]:
-        """all_adapters() 过滤停用。漂移矩阵 / push / scan 都走这里。
+        """builtin（过滤停用）+ custom。漂移矩阵 / push / scan 都走这里。
+
+        builtin 停用走本地 enabled（FR-2.4.10）；custom 的增删走云端
+        Runtime 表同步（sync_custom_runtimes），云端不下发即消失。
 
         例外：sync_pull / resolve_conflict 保持 all_adapters() —— 用户显式
         操作（回收残留改动 / 冲突决策）必须仍能作用于停用 runtime，数据不丢。
         """
         disabled = self._disabled_runtime_keys()
-        return [a for a in all_adapters() if a.key not in disabled]
+        builtins = [
+            a for a in all_adapters() if a.key not in disabled
+        ]
+        customs = [
+            a for a in self._custom_adapters() if a.key not in disabled
+        ]
+        return builtins + customs
+
+    def sync_custom_runtimes(self, items: list[dict]) -> dict:
+        """云端 custom Runtime 全量对齐到本地（FR-1.0.34，写本地 SQLite）。
+
+        云端 Runtime 表是 custom 的事实源：items = 该用户全部非
+        discover_only 的 custom 条目（[{key, root_path}]）。daemon 端 diff
+        本地行：不在列表的删（云端已删/转 discover_only），在列表的
+        upsert（路径可能改过）。幂等。
+
+        删除本地行不删磁盘文件（保守，与 builtin 停用同语义）。
+        """
+        from skillos.core.algorithm.adapters.custom import CustomRuntimeAdapter
+
+        wanted: dict[str, str] = {}
+        for it in items or []:
+            key, root = (it or {}).get("key"), (it or {}).get("root_path")
+            if not key or not root:
+                raise ValueError(f"custom 条目缺 key/root_path: {it!r}")
+            if not key.startswith("custom:"):
+                raise ValueError(f"custom 条目 key 必须以 custom: 开头: {key!r}")
+            wanted[key] = str(root)
+
+        builtin_keys = {a.key for a in all_adapters()}
+        local_custom = {
+            r.key: r for r in self.db.list_runtimes()
+            if r.adapter_key not in builtin_keys
+        }
+
+        removed = 0
+        for key in local_custom:
+            if key not in wanted:
+                self.db.delete_runtime(key)
+                removed += 1
+        for key, root in wanted.items():
+            # 构造校验（key 前缀 / 空 root 已在上面查过，这里走 adapter 校验）
+            CustomRuntimeAdapter(key, root)
+            self.db.upsert_runtime(
+                runtime_id=key, key=key, adapter_key="custom",
+                root_path=Path(root), scope="user",
+            )
+        return {"synced": len(wanted), "removed": removed}
 
     def set_runtime_enabled(self, key: str, enabled: bool) -> dict:
         """停用 / 启用 builtin Runtime（FR-2.4.10，写本地 SQLite）。

@@ -69,6 +69,30 @@ async def _submit(request: Request, user_id: str, op: str, params: dict,
         raise HTTPException(status_code=503, detail="DAEMON_OFFLINE") from None
 
 
+async def _push_custom_sync(request: Request, user_id: str) -> None:
+    """custom Runtime 全量对齐 daemon 本地（尽力，失败静默）。
+
+    云端 Runtime 表是事实源；daemon 离线时跳过（sync.py 打开 Dashboard /
+    GET discovered 时会再试 —— 自愈：用户看矩阵时必然对齐）。
+    discover_only 条目不下发（T25 红线：只发现不管理，不进矩阵不进分发）。
+    """
+    repo = CloudRepo(request.app.state.session_factory())
+    try:
+        items = [
+            {"key": rt.key, "root_path": rt.root_path}
+            for rt in repo.list_custom_runtimes(user_id)
+            if not rt.discover_only
+        ]
+    finally:
+        repo.s.close()
+    try:
+        await request.app.state.hub.submit_task(
+            user_id, "runtime_sync_custom", {"items": items}, timeout=15.0,
+        )
+    except (ConnectionError, ValueError, TimeoutError):
+        pass  # 离线 / 竞态：下次 discovered / status 时重试
+
+
 def _envelope_error(err: dict | None) -> dict:
     return {"code": (err or {}).get("code", "INTERNAL"),
             "message": (err or {}).get("message", "")}
@@ -94,6 +118,8 @@ async def list_discovered(
     if not result.get("ok"):
         return {"ok": False, "data": None,
                 "error": _envelope_error(result.get("error"))}
+    # 先对齐 custom（自愈：daemon 离线期间的云端变更在此补推）
+    await _push_custom_sync(request, user_id)
     daemon_data = result.get("data") or {}
 
     # 合并 cloud 端 custom Runtime（已纳管段）
@@ -150,6 +176,7 @@ async def list_discovered(
 @router.post("/custom")
 async def create_custom(
     body: CustomRuntimeCreate,
+    request: Request,
     user_id: str = Depends(get_current_user_id),
     repo: CloudRepo = Depends(get_repo),
 ) -> dict:
@@ -173,12 +200,14 @@ async def create_custom(
             "code": "RUNTIME_EXISTS" if "已存在" in str(e) else "VALIDATION",
             "message": str(e),
         }}
+    await _push_custom_sync(request, user_id)  # daemon 端登记（漂移矩阵列）
     return {"ok": True, "data": _to_runtime_dict(rt), "error": None}
 
 
 @router.patch("/{key:path}")
 async def update_custom(
     key: str, body: CustomRuntimeUpdate,
+    request: Request,
     user_id: str = Depends(get_current_user_id),  # noqa: ARG001（保留：未来 user-scope 检查）
     repo: CloudRepo = Depends(get_repo),
 ) -> dict:
@@ -195,12 +224,14 @@ async def update_custom(
             "code": "NOT_FOUND",
             "message": f"custom Runtime 不存在: {key}",
         }}
+    await _push_custom_sync(request, user_id)  # 路径变更同步 daemon
     return {"ok": True, "data": _to_runtime_dict(rt), "error": None}
 
 
 @router.delete("/{key:path}")
 async def delete_custom(
     key: str,
+    request: Request,
     user_id: str = Depends(get_current_user_id),  # noqa: ARG001
     repo: CloudRepo = Depends(get_repo),
 ) -> dict:
@@ -214,6 +245,7 @@ async def delete_custom(
             "code": "NOT_FOUND",
             "message": f"custom Runtime 不存在或非 custom 条目: {key}",
         }}
+    await _push_custom_sync(request, user_id)  # daemon 端移除登记
     return {"ok": True, "data": {"key": key, "deleted": True}, "error": None}
 
 

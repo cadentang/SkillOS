@@ -39,7 +39,7 @@ WS_TASK_OPS: frozenset[str] = frozenset(
         # 仅读；写操作（POST / PATCH / DELETE custom Runtime）走云端 cloud_repo，
         # daemon 不参与（不暴露 "force"/"git" 类通用操作，OUT-14）
         "runtimes_list", "runtime_diagnose", "protocol_status",
-        "runtime_set_enabled",
+        "runtime_set_enabled", "runtime_sync_custom",
     }
 )
 

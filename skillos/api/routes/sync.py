@@ -65,7 +65,17 @@ def _cached_cells(pairs) -> dict[str, dict[str, dict]]:
 
 
 async def _live_matrix(request: Request, user_id: str) -> list[dict] | None:
-    """daemon 在线时取实时矩阵（含徽标）；离线返回 None（调用方降级缓存）。"""
+    """daemon 在线时取实时矩阵（含徽标）；离线返回 None（调用方降级缓存）。
+
+    取矩阵前先尽力对齐 custom Runtime（自愈：daemon 离线期间云端建的
+    custom 条目在此补推，否则矩阵缺列）。失败静默 —— 对齐是尽力优化，
+    不能让它把"取矩阵"本身搞挂。
+    """
+    try:
+        from skillos.api.routes.runtimes import _push_custom_sync
+        await _push_custom_sync(request, user_id)
+    except Exception:  # noqa: BLE001 —— 对齐尽力而为，不阻塞矩阵读取
+        pass
     try:
         # 90s：daemon 首次全扫（27 skill × git 子进程）在 Windows 上 25s+，
         # 30s 太贴线——超时会被误判离线降级缓存（表现即"页面慢且数据旧"）

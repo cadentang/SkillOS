@@ -309,6 +309,19 @@ class TaskExecutor:
                 return {"ok": False, "error": {"code": "INVALID_INPUT",
                                                "message": str(e)}}
 
+        if op == "runtime_sync_custom":
+            # FR-1.0.34 / T25：云端 custom Runtime 全量对齐本地（写 SQLite）。
+            # 云端是事实源；discover_only 条目云端不下发（T25 红线）。
+            # 触发权在用户（Web 建/改/删 custom → 云端 handler → 本 task）。
+            try:
+                result = engine.sync_custom_runtimes(
+                    list(params.get("items") or []),
+                )
+                return {"ok": True, "data": result}
+            except ValueError as e:
+                return {"ok": False, "error": {"code": "INVALID_INPUT",
+                                               "message": str(e)}}
+
         if op == "protocol_status":
             # FR-1.0.29 / T18：sticky + HEAD trailer + 一致性
             return {"ok": True, "data": engine.protocol_status()}

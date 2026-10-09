@@ -60,6 +60,7 @@ class IndexStore(Protocol):
                        scope: str) -> None: ...
     def list_runtimes(self) -> list[Runtime]: ...
     def set_runtime_enabled(self, key: str, enabled: bool) -> bool: ...
+    def delete_runtime(self, key: str) -> bool: ...
     # bindings
     def upsert_binding(self, b: RuntimeBinding) -> RuntimeBinding: ...
     def get_binding(self, skill_id: str, runtime_id: str) -> RuntimeBinding | None: ...
@@ -162,6 +163,15 @@ class SqliteIndexStore:
         if row is None:
             return False
         row.enabled = enabled
+        self._s.commit()
+        return True
+
+    def delete_runtime(self, key: str) -> bool:
+        """按 key 删登记行（云端 custom 删除时对齐）。返回 False = 未登记。"""
+        row = self._s.scalar(select(Runtime).where(Runtime.key == key))
+        if row is None:
+            return False
+        self._s.delete(row)
         self._s.commit()
         return True
 
