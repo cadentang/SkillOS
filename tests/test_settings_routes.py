@@ -73,10 +73,16 @@ class TestSettingsRoutesRegistered:
 
 
 class TestProtocolStatusOffline:
-    """GET /api/protocol/status 在 daemon 离线时必须结构化 503."""
+    """GET /api/protocol/status 在 daemon 离线时必须返回结构化 envelope.
 
-    def test_protocol_status_daemon_offline_returns_503(self, client):
-        """无 daemon → 503 DAEMON_OFFLINE, 不静默 ok=True.
+    设计决策（**不抛 503**，仿 `daemon.py` 风格）:
+    - 离线时返回 `{ok: True, data: {ok: False, reason: "daemon offline", ...}}`
+    - 抛 503 会让 `client.ts:request` 抛 ApiError → useQuery data=undefined →
+      前端 "data is undefined" —— 上一版就撞这个坑.
+    """
+
+    def test_protocol_status_daemon_offline_returns_envelope(self, client):
+        """无 daemon → 200 + envelope {ok: True, data: {ok: False, reason: 'daemon offline'}}.
 
         区分"协议没握手"与"代码抛异常": 前端可以分别提示.
         """
@@ -85,10 +91,17 @@ class TestProtocolStatusOffline:
             "/api/protocol/status",
             headers={"Authorization": f"Bearer {token}"},
         )
-        assert r.status_code == 503, (
-            f"daemon 离线应 503, 实际 {r.status_code}: {r.text[:200]}"
+        assert r.status_code == 200, (
+            f"daemon 离线应 200 (envelope 风格), 实际 {r.status_code}: {r.text[:200]}"
         )
-        assert r.json()["detail"] == "DAEMON_OFFLINE"
+        body = r.json()
+        assert body["ok"] is True
+        assert body["data"]["ok"] is False
+        assert body["data"]["reason"] == "daemon offline"
+        # 8 字段占位（current_supported 等设为 None, 前端 interface 允许）
+        assert body["data"]["current_supported"] is None
+        assert body["data"]["sticky_version"] is None
+        assert body["data"]["read_only"] is True
 
     def test_protocol_status_op_in_whitelist(self):
         """OUT-14 红线: protocol_status 必须在 WS_TASK_OPS 白名单里.

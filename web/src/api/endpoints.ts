@@ -469,10 +469,12 @@ export interface DiscoveredResponse {
 }
 
 export interface ProtocolStatus {
-  current_supported: number;
+  /** 本机支持的最大协议版本. daemon 离线时 = null. */
+  current_supported: number | null;
   sticky_version: number | null;
   trailer_version: number | null;
   head_message_first_line: string | null;
+  /** 三态合并: 协议一致 + daemon 可用. ok=false 时看 reason. */
   ok: boolean;
   read_only: boolean;
   reason: string | null;
