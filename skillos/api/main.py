@@ -28,6 +28,7 @@ from skillos.api.routes import (
     daemon,
     files,
     logs,
+    protocol,
     runtimes,
     skills,
     sync,
@@ -156,6 +157,7 @@ def create_app(db_url: str | None = None, jwt_secret: str | None = None,
         upstream.router,
         runtimes.router,
         daemon.router,  # FR-2.4.10 Settings "守护状态" 区块
+        protocol.router,  # FR-2.4.10 Settings "协议版本" 区块
         teams.router,
         logs.router,  # FR-1.1.12：daemon 日志查看代理
     )
