@@ -35,6 +35,11 @@ class CustomRuntimeUpdate(BaseModel):
     discover_only: bool | None = None  # None = 不改
 
 
+class RuntimeEnabledUpdate(BaseModel):
+    """builtin 停用 / 启用（FR-2.4.10 已纳管行"删除"= 停用）。"""
+    enabled: bool
+
+
 # ---------------------------------------------------------------- helpers
 
 
@@ -95,14 +100,23 @@ async def list_discovered(
     custom_rts = repo.list_custom_runtimes(user_id)
     custom_items = [_to_runtime_dict(rt) for rt in custom_rts]
 
-    # builtin 4 个标 managed=True / custom=False（统一字段）
+    # builtin 4 个标 managed=True / custom=False（统一字段）。
+    # disabled 的 builtin 挪到未纳管段（FR-2.4.10 停用语义：从已纳管消失，
+    # 前端显示"已停用 + 启用"按钮，重新启用即恢复）
     builtins = []
+    disabled_items = []
     for b in daemon_data.get("builtins") or []:
-        builtins.append({
+        entry = {
             "key": b["key"], "name": b.get("name") or b["key"],
             "version": b.get("version"),
-            "custom": False, "managed": True, "discover_only": False,
-        })
+            "custom": False, "discover_only": False,
+        }
+        if b.get("disabled"):
+            entry.update({"managed": False, "disabled": True})
+            disabled_items.append(entry)
+        else:
+            entry.update({"managed": True, "disabled": False})
+            builtins.append(entry)
 
     # candidates 段：白名单命中但 key 还没纳管的（剔除已纳管 custom + builtin）。
     # custom:<slug> 纳管后，白名单同名候选不再重复显示（否则"加入"后
@@ -118,6 +132,8 @@ async def list_discovered(
         if c.get("key") and c["key"] not in managed_keys
         and c["key"] not in custom_slugs
     ]
+    # 已停用 builtin 也进未纳管段（前端按 disabled 字段显示"已停用 + 启用"）
+    candidates = disabled_items + candidates
 
     return {
         "ok": True,
@@ -199,6 +215,25 @@ async def delete_custom(
             "message": f"custom Runtime 不存在或非 custom 条目: {key}",
         }}
     return {"ok": True, "data": {"key": key, "deleted": True}, "error": None}
+
+
+@router.post("/{key:path}/enabled")
+async def set_runtime_enabled(
+    key: str, body: RuntimeEnabledUpdate, request: Request,
+    user_id: str = Depends(get_current_user_id),
+) -> dict:
+    """builtin Runtime 停用 / 启用（FR-2.4.10，写 daemon 本地 SQLite）。
+
+    停用语义：漂移矩阵隐藏该列 + push 不再分发 + scan 不再导入；
+    已分发文件不删、binding 保留（重新启用即恢复，历史基线不丢）。
+    custom Runtime 不走这里（云端 Runtime 表，PATCH /{key}）。
+    """
+    result = await _submit(request, user_id, "runtime_set_enabled",
+                            {"key": key, "enabled": body.enabled}, timeout=15.0)
+    if not result.get("ok"):
+        return {"ok": False, "data": None,
+                "error": _envelope_error(result.get("error"))}
+    return {"ok": True, "data": result.get("data"), "error": None}
 
 
 @router.get("/{key:path}/diagnose")

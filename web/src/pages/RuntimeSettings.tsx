@@ -89,6 +89,12 @@ function RuntimeBlock() {
     onSuccess: invalidate,
   });
 
+  const setEnabledMut = useMutation({
+    mutationFn: ({ key, enabled }: { key: string; enabled: boolean }) =>
+      endpoints.runtimesSetEnabled(key, enabled),
+    onSuccess: invalidate,
+  });
+
   const diagnoseMut = useMutation({
     mutationFn: (key: string) => endpoints.runtimesDiagnose(key),
     onSuccess: (data, key) => {
@@ -141,9 +147,18 @@ function RuntimeBlock() {
 
   function deleteCustom(rt: DiscoveredRuntime) {
     if (!rt.custom) {
-      window.alert(
-        `「${rt.name}」是内置 Runtime，不可删除。\n\n如不想使用，分发时不勾选该目标即可。`,
-      );
+      // builtin"删除" = 真停用（FR-2.4.10）：矩阵隐藏 + 不分发 + 不扫描；
+      // 已分发文件不删、binding 保留，重新启用即恢复。
+      if (
+        !window.confirm(
+          `停用内置 Runtime「${rt.name}」？\n\n` +
+            "· 漂移矩阵将隐藏该列，不再分发 / 扫描\n" +
+            "· 已分发到磁盘的文件不会被删除\n" +
+            "· 可在「未纳管 Runtime」列表重新启用",
+        )
+      )
+        return;
+      setEnabledMut.mutate({ key: rt.key, enabled: false });
       return;
     }
     if (
@@ -204,26 +219,40 @@ function RuntimeBlock() {
               name={c.name}
               path={c.path}
               hint={
-                c.custom
-                  ? "自定义 · 待加入（discover_only）"
-                  : c.path_exists
-                    ? `路径命中 · ${c.skill_count ?? 0} 个 skill`
-                    : "路径未命中"
+                c.disabled
+                  ? "builtin · 已停用（不分发 / 不扫描）"
+                  : c.custom
+                    ? "自定义 · 待加入（discover_only）"
+                    : c.path_exists
+                      ? `路径命中 · ${c.skill_count ?? 0} 个 skill`
+                      : "路径未命中"
               }
               hintColor={
-                c.custom
-                  ? "warn"
-                  : c.path_exists
-                    ? "ok"
-                    : "warn"
+                c.disabled
+                  ? "danger"
+                  : c.custom
+                    ? "warn"
+                    : c.path_exists
+                      ? "ok"
+                      : "warn"
               }
               actions={
                 <>
-                  <Btn
-                    label="加入"
-                    onClick={() => joinRuntime(c)}
-                    disabled={createMut.isPending || updateMut.isPending}
-                  />
+                  {c.disabled ? (
+                    <Btn
+                      label="启用"
+                      onClick={() =>
+                        setEnabledMut.mutate({ key: c.key, enabled: true })
+                      }
+                      disabled={setEnabledMut.isPending}
+                    />
+                  ) : (
+                    <Btn
+                      label="加入"
+                      onClick={() => joinRuntime(c)}
+                      disabled={createMut.isPending || updateMut.isPending}
+                    />
+                  )}
                 </>
               }
             />

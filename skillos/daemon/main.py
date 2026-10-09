@@ -295,6 +295,20 @@ class TaskExecutor:
                 return {"ok": True, "data": data}
             except Exception as e:  # noqa: BLE001
                 return {"ok": False, "error": {"code": "IO", "message": str(e)}}
+        if op == "runtime_set_enabled":
+            # FR-2.4.10：builtin 停用/启用（写本地 SQLite runtimes.enabled）。
+            # 写操作但触发权完全在用户（Web 按钮 → 云端 handler → 本 task），
+            # 与 T25/T26 红线一致（MCP / 后台批量无调用点）。
+            try:
+                result = engine.set_runtime_enabled(
+                    str(params.get("key") or ""),
+                    bool(params.get("enabled", True)),
+                )
+                return {"ok": True, "data": result}
+            except ValueError as e:
+                return {"ok": False, "error": {"code": "INVALID_INPUT",
+                                               "message": str(e)}}
+
         if op == "protocol_status":
             # FR-1.0.29 / T18：sticky + HEAD trailer + 一致性
             return {"ok": True, "data": engine.protocol_status()}

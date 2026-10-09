@@ -59,6 +59,7 @@ class IndexStore(Protocol):
     def upsert_runtime(self, runtime_id: str, key: str, adapter_key: str, root_path: Path,
                        scope: str) -> None: ...
     def list_runtimes(self) -> list[Runtime]: ...
+    def set_runtime_enabled(self, key: str, enabled: bool) -> bool: ...
     # bindings
     def upsert_binding(self, b: RuntimeBinding) -> RuntimeBinding: ...
     def get_binding(self, skill_id: str, runtime_id: str) -> RuntimeBinding | None: ...
@@ -154,6 +155,15 @@ class SqliteIndexStore:
 
     def list_runtimes(self) -> list[Runtime]:
         return list(self._s.scalars(select(Runtime).order_by(Runtime.key)))
+
+    def set_runtime_enabled(self, key: str, enabled: bool) -> bool:
+        """按 key 停用 / 启用（FR-2.4.10）。返回 False = 该 key 未登记。"""
+        row = self._s.scalar(select(Runtime).where(Runtime.key == key))
+        if row is None:
+            return False
+        row.enabled = enabled
+        self._s.commit()
+        return True
 
     # ---- bindings ----
 

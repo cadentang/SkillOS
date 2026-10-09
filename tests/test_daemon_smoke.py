@@ -115,6 +115,48 @@ class TestDaemonOpsSmoke:
         assert isinstance(data["ok"], bool)
         assert isinstance(data["read_only"], bool)
 
+    def test_runtime_set_enabled_roundtrip(self, engine_home):
+        """FR-2.4.10: builtin 停用/启用 round-trip + 矩阵联动.
+
+        停用 claude → status_matrix 无 claude 列 + runtimes_list builtins
+        标 disabled=True；启用 → 恢复.
+        """
+        engine, _ = engine_home
+        ex = TaskExecutor(engine)
+
+        # 停用
+        r = ex.execute("runtime_set_enabled", {"key": "claude", "enabled": False})
+        assert r["ok"], r
+        assert r["data"] == {"key": "claude", "enabled": False}
+
+        # 矩阵无 claude 列（fixture 只有 demo 一个 skill，停用前必有 claude 列）
+        matrix = engine.status_matrix()
+        rt_keys = {c.runtime_key for c in matrix}
+        assert "claude" not in rt_keys, f"停用后矩阵仍有 claude: {rt_keys}"
+
+        # builtins 段标 disabled
+        lst = ex.execute("runtimes_list", {})
+        by_key = {b["key"]: b for b in lst["data"]["builtins"]}
+        assert by_key["claude"]["disabled"] is True
+
+        # 恢复
+        r2 = ex.execute("runtime_set_enabled", {"key": "claude", "enabled": True})
+        assert r2["ok"], r2
+        matrix2 = engine.status_matrix()
+        assert "claude" in {c.runtime_key for c in matrix2}
+        lst2 = ex.execute("runtimes_list", {})
+        by_key2 = {b["key"]: b for b in lst2["data"]["builtins"]}
+        assert by_key2["claude"]["disabled"] is False
+
+    def test_runtime_set_enabled_unknown_key(self, engine_home):
+        """FR-2.4.10: 未知 / custom key 必须结构化 INVALID_INPUT."""
+        engine, _ = engine_home
+        r = TaskExecutor(engine).execute(
+            "runtime_set_enabled", {"key": "no-such", "enabled": True},
+        )
+        assert not r["ok"]
+        assert r["error"]["code"] == "INVALID_INPUT"
+
     def test_runtime_diagnose_by_key_builtin(self, engine_home):
         """FR-1.0.33 / FR-2.4.10: builtin key 诊断走 adapter 约定路径（T12）.
 

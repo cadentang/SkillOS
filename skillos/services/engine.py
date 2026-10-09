@@ -167,10 +167,45 @@ class LocalEngine:
 
     def _root_specs(self) -> list[RootSpec]:
         specs: list[RootSpec] = []
-        for adapter in all_adapters():
+        for adapter in self._enabled_adapters():
             for root in adapter.scan_roots("user", home=self.home):
                 specs.append(RootSpec(runtime_key=adapter.key, root=root, scope="user"))
         return specs
+
+    # ---- Runtime 停用（FR-2.4.10 已纳管行通用删除/恢复）----
+
+    def _disabled_runtime_keys(self) -> set[str]:
+        """本地 runtimes 表里 enabled=False 的 key 集合。
+
+        init_env 的 upsert 只更新 key/adapter_key/root_path 不动 enabled
+        （index_repo.upsert_runtime），幂等重跑不会复活已停用的 runtime。
+        """
+        return {
+            r.key for r in self.db.list_runtimes() if not r.enabled
+        }
+
+    def _enabled_adapters(self) -> list[RuntimeAdapter]:
+        """all_adapters() 过滤停用。漂移矩阵 / push / scan 都走这里。
+
+        例外：sync_pull / resolve_conflict 保持 all_adapters() —— 用户显式
+        操作（回收残留改动 / 冲突决策）必须仍能作用于停用 runtime，数据不丢。
+        """
+        disabled = self._disabled_runtime_keys()
+        return [a for a in all_adapters() if a.key not in disabled]
+
+    def set_runtime_enabled(self, key: str, enabled: bool) -> dict:
+        """停用 / 启用 builtin Runtime（FR-2.4.10，写本地 SQLite）。
+
+        语义：停用 = 漂移矩阵隐藏该列 + push 不再分发 + scan 不再导入；
+        已分发到磁盘的文件**不删**（保守，用户自己清）；binding 保留
+        （重新启用即恢复管理，历史基线不丢）。
+        """
+        if not any(a.key == key for a in all_adapters()):
+            raise ValueError(f"未知 builtin runtime: {key}（custom 走云端 Runtime 表）")
+        ok = self.db.set_runtime_enabled(key, enabled)
+        if not ok:
+            raise ValueError(f"runtime 未登记（先 init_env）: {key}")
+        return {"key": key, "enabled": enabled}
 
     def scan_all(self) -> list:
         log.info(
@@ -280,9 +315,12 @@ class LocalEngine:
         return self._head()
 
     def status_matrix(self) -> list[DriftReport]:
-        """四端漂移矩阵（FR-1.0.6）。「不适用」格子不进矩阵（04 §2.1.3）。"""
+        """四端漂移矩阵（FR-1.0.6）。「不适用」格子不进矩阵（04 §2.1.3）。
+
+        停用的 builtin 不进矩阵（FR-2.4.10 删除语义 = 隐藏该列）。
+        """
         out: list[DriftReport] = []
-        adapters = {a.key: a for a in all_adapters()}
+        adapters = {a.key: a for a in self._enabled_adapters()}
         # HEAD 一次解析 + 全部快照一次批量取：逐 skill 调 snapshot_at 时
         # 27 skill ≈ 100+ 次 git spawn（Windows 20s+），批量 = 2 次 spawn
         head = self._head()
@@ -451,7 +489,7 @@ class LocalEngine:
                         ),
                     )],
                 )
-            adapters = {a.key: a for a in all_adapters()}
+            adapters = {a.key: a for a in self._enabled_adapters()}
             targets: list[TargetRequest] = []
             for key, adapter in adapters.items():
                 if runtime_keys is not None and key not in runtime_keys:
@@ -1561,8 +1599,12 @@ class LocalEngine:
 
         home = self.home
         candidates = [c.to_dict() for c in discover_potential_runtimes(home)]
+        disabled = self._disabled_runtime_keys()
         builtins = [
-            {"key": a.key, "name": a.key, "version": a.version}
+            {
+                "key": a.key, "name": a.key, "version": a.version,
+                "disabled": a.key in disabled,
+            }
             for a in all_adapters()
         ]
         return {

@@ -412,6 +412,12 @@ export const endpoints = {
     api.delete<{ key: string; deleted: boolean }>(
       `/api/runtimes/${encodeURIComponent(key)}`,
     ),
+  /** builtin 停用 / 启用（FR-2.4.10）：停用 = 矩阵隐藏 + 不分发 + 不扫描。 */
+  runtimesSetEnabled: (key: string, enabled: boolean) =>
+    api.post<{ key: string; enabled: boolean }>(
+      `/api/runtimes/${encodeURIComponent(key)}/enabled`,
+      { enabled },
+    ),
   /** custom Runtime 路径诊断（FR-1.0.33 / D9）：存在性 + 命中数 + 错误透传。 */
   runtimesDiagnose: (key: string) =>
     api.get<{
@@ -459,6 +465,8 @@ export interface DiscoveredRuntime {
   verified_at?: string | null;
   /** 命中 = 该路径下至少一个 SKILL.md（与 discover 服务端命中判据同语义） */
   matched?: boolean;
+  /** builtin 已停用（FR-2.4.10）：显示在未纳管段，带"启用"按钮 */
+  disabled?: boolean;
 }
 
 export interface DiscoveredResponse {
