@@ -11,7 +11,7 @@ from __future__ import annotations
 import secrets
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from skillos.core.constants import DRIFT_SEVERITY
@@ -495,6 +495,83 @@ class CloudRepo:
             runtime_id=runtime_id, detail=detail, by=by,
         ))
         self.s.commit()
+
+    # ---------------------------------------------------------------- Settings 区块
+    # FR-2.4.10 / T26：custom Runtime 的 CRUD。
+    # 写操作全部在云端 handler 直接调（无需 daemon task）：Runtime 表是 cloud
+    # 端 db，daemon 不连 cloud db；custom 条目在 daemon 端没有副作用。
+    # discover_only 标志：custom 新建时默认 True（必须显式置 False 才进正常使用）
+    # —— 显式状态机（T25 红线："路径填了但忘了改标志"被默认行为吞掉是禁止的）。
+
+    def list_custom_runtimes(self, owner_id: str) -> list[models.Runtime]:
+        """该 user 的全部 custom Runtime（含 discover_only=True 待填路径的）。
+        Settings 页"已纳管 Runtime 列表"的 custom 段数据源。
+        """
+        return list(self.s.scalars(
+            select(models.Runtime)
+            .where(models.Runtime.owner_id == owner_id)
+            .where(models.Runtime.adapter_key == "custom")
+        ))
+
+    def get_runtime_by_key(self, key: str) -> models.Runtime | None:
+        return self.s.scalar(
+            select(models.Runtime).where(models.Runtime.key == key)
+        )
+
+    def create_custom_runtime(
+        self, *, key: str, name: str | None, root_path: str,
+        scope: str = "user", owner_id: str, discover_only: bool = False,
+    ) -> models.Runtime:
+        """创建 custom Runtime 条目（FR-1.0.34 / T25）。
+
+        key 必须 `custom:<name>` 命名空间（FR-1.0.25），避免与 builtin 冲突。
+        discover_only 默认 False = "已纳管 + 路径已填好"；用户也可先建空条目
+        （discover_only=True）再到 Settings 编辑路径（FR-1.0.34 的"先创建后填"路径）。
+        """
+        if not key.startswith("custom:"):
+            raise ValueError(f"custom Runtime key 必须 'custom:' 命名空间: {key!r}")
+        if self.s.scalar(select(models.Runtime).where(models.Runtime.key == key)):
+            raise ValueError(f"Runtime key 已存在: {key!r}")
+        rt = models.Runtime(
+            id=f"rt_{secrets.token_hex(6)}", key=key, name=name or key,
+            adapter_key="custom", root_path=root_path, scope=scope,
+            enabled=True, owner_id=owner_id, discover_only=discover_only,
+        )
+        self.s.add(rt)
+        self.s.commit()
+        return rt
+
+    def update_custom_runtime_path(
+        self, key: str, root_path: str, discover_only: bool | None = None,
+    ) -> models.Runtime | None:
+        """编辑 custom Runtime 路径（FR-1.0.25 / FR-1.0.33）。
+
+        discover_only 显式传：None = 不改，True / False = 改。T25 红线：不能
+        "改路径就自动 discover_only=False" —— 用户必须显式确认。
+        """
+        rt = self.get_runtime_by_key(key)
+        if rt is None or rt.adapter_key != "custom":
+            return None
+        rt.root_path = root_path
+        if discover_only is not None:
+            rt.discover_only = discover_only
+        self.s.commit()
+        return rt
+
+    def delete_custom_runtime(self, key: str) -> bool:
+        """删除 custom Runtime（FR-1.0.25 / NFR-11.4）。仅 custom 条目可删（不删 builtin）。"""
+        rt = self.get_runtime_by_key(key)
+        if rt is None or rt.adapter_key != "custom":
+            return False
+        # 同时清理 binding（避免悬挂引用；deletion cascade 由 ORM 关系决定）
+        self.s.execute(
+            delete(models.RuntimeBinding).where(
+                models.RuntimeBinding.runtime_id == rt.id
+            )
+        )
+        self.s.delete(rt)
+        self.s.commit()
+        return True
 
 
 def aggregate_skill_status(states: list[str]) -> str:

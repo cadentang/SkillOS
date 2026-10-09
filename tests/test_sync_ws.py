@@ -246,6 +246,50 @@ class TestWsTaskRoundtrip:
 
         asyncio.run(scenario())
 
+    def test_task_done_broadcast_carries_op(self):
+        """task_done 广播必须带 op 字段（04 §4.2，自激循环修复的契约侧）。
+
+        前端按 op 区分读写：只对写集失效 drift/gate。若 op 缺失，前端
+        无法区分「读任务完成」与「数据变更」，读任务重取自身又产生
+        task_done，回到 gate-summary/status 请求风暴。
+        """
+        import asyncio
+
+        from skillos.api.ws_hub import AgentConn, WsHub
+
+        class FakeWs:
+            def __init__(self) -> None:
+                self.sent: list[dict] = []
+
+            async def send_json(self, msg: dict) -> None:
+                self.sent.append(msg)
+
+            async def close(self, **_kw) -> None:
+                pass
+
+        async def scenario() -> None:
+            hub = WsHub()
+            await hub.register_agent(AgentConn(
+                ws=FakeWs(), agent_id="a1", user_id="u1", token_id="t1"))
+            ui = FakeWs()
+            await hub.register_ui(ui, "u1")  # type: ignore[arg-type]
+
+            submit = asyncio.create_task(
+                hub.submit_task("u1", "gate_summary", {}, timeout=5.0))
+            await asyncio.sleep(0)
+            rid = hub.agents["a1"].ws.sent[0]["request_id"]
+            await hub.handle_result(rid, {"ok": True, "data": {"summary": {}}})
+            result = await submit
+            assert result["ok"]
+
+            # 广播给 UI 的 task_done 必须含 op（读任务也带 —— 字段统一存在，
+            # 过滤是前端职责）
+            dones = [m for m in ui.sent if m.get("type") == "task_done"]
+            assert dones, "UI 应收到 task_done 广播"
+            assert dones[0]["op"] == "gate_summary"
+
+        asyncio.run(scenario())
+
     def test_ui_register_gets_status_snapshot(self):
         """FR-2.1.5 回归：daemon 先连、UI 后连，注册即收到 daemon_status 快照。
 

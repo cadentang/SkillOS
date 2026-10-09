@@ -31,6 +31,12 @@ from typing import Any
 import anyio
 from mcp.server.fastmcp import FastMCP
 
+from skillos.core.logging import (
+    bind_op_id,
+    get_logger,
+    reset_op_context,
+    setup_logging,
+)
 from skillos.services.engine import LocalEngine, default_env
 
 mcp = FastMCP("skillos", instructions=(
@@ -38,6 +44,8 @@ mcp = FastMCP("skillos", instructions=(
     "先预览（dry_run）确认无误后再显式传 dry_run=false 落盘。"
     "冲突与删除确认没有 force 通道，需人工在 Web 处理。"
 ))
+
+log = get_logger("skillos.mcp")
 
 _engine: LocalEngine | None = None
 
@@ -57,8 +65,16 @@ def _err(code: str, message: str) -> dict:
 
 
 def _threaded(fn: Callable[[], dict]) -> Any:
-    """把阻塞实现下沉 worker 线程（见模块 docstring 工程要点）。"""
-    return anyio.to_thread.run_sync(fn)
+    """把阻塞实现下沉 worker 线程（见模块 docstring 工程要点）。
+
+    同时为本次调用生成 op_id（每次 MCP request 一个），
+    structlog contextvars 在 worker 线程中正确传递。
+    """
+    bind_op_id(component="mcp", tool=getattr(fn, "__name__", "tool"))
+    try:
+        return anyio.to_thread.run_sync(fn)
+    finally:
+        reset_op_context()
 
 
 # ---------------------------------------------------------------- 只读工具
@@ -195,6 +211,11 @@ async def skillos_sync_push(slug: str, targets: list[str] | None = None,
 
 def _push_impl(slug: str, targets: list[str] | None, dry_run: bool) -> dict:
     engine = get_engine()
+    log.info(
+        "sync_push_started",
+        skill_slug=slug,
+        targets=targets, dry_run=dry_run,
+    )
     try:
         report = engine.push_skill(
             slug,
@@ -204,6 +225,11 @@ def _push_impl(slug: str, targets: list[str] | None, dry_run: bool) -> dict:
             confirmed_removals=None,   # 无人确认 → 待删文件 held_back
         )
     except ValueError as e:
+        log.warning(
+            "sync_push_failed",
+            skill_slug=slug,
+            error_code="INVALID_INPUT", detail=str(e),
+        )
         return _err("INVALID_INPUT", str(e))
     outcomes = []
     held_back: list[str] = []
@@ -216,6 +242,23 @@ def _push_impl(slug: str, targets: list[str] | None, dry_run: bool) -> dict:
         if o.new_installed_hash:
             item["installed_hash"] = o.new_installed_hash
         outcomes.append(item)
+    if dry_run:
+        log.info(
+            "dry_run_executed",
+            op="sync_push", skill_slug=slug,
+            held_count=len(held_back),
+        )
+    elif report.ok:
+        log.info(
+            "sync_push_completed",
+            skill_slug=slug, targets=targets,
+        )
+    else:
+        log.warning(
+            "sync_push_failed",
+            skill_slug=slug,
+            error_code=next((o.error_code for o in report.outcomes if o.error_code), None),
+        )
     return {
         "ok": report.ok, "dry_run": dry_run,
         "data": {"outcomes": outcomes, "held_back_removals": sorted(set(held_back))},
@@ -234,10 +277,30 @@ async def skillos_sync_pull(slug: str, runtime: str, dry_run: bool = True) -> di
 
 def _pull_impl(slug: str, runtime: str, dry_run: bool) -> dict:
     engine = get_engine()
+    log.info(
+        "sync_pull_started",
+        skill_slug=slug, runtime_key=runtime, dry_run=dry_run,
+    )
     try:
-        return engine.pull_skill(slug, runtime, dry_run=dry_run)
+        result = engine.pull_skill(slug, runtime, dry_run=dry_run)
     except ValueError as e:
+        log.warning(
+            "sync_pull_failed",
+            skill_slug=slug, runtime_key=runtime,
+            error_code="INVALID_INPUT", detail=str(e),
+        )
         return _err("INVALID_INPUT", str(e))
+    if dry_run:
+        log.info(
+            "dry_run_executed",
+            op="sync_pull", skill_slug=slug, runtime_key=runtime,
+        )
+    elif result.get("ok"):
+        log.info(
+            "sync_pull_completed",
+            skill_slug=slug, runtime_key=runtime,
+        )
+    return result
 
 
 @mcp.tool()
@@ -255,7 +318,23 @@ def _upgrade_impl(slug: str) -> dict:
 
 
 def main() -> None:
-    mcp.run()  # stdio 传输（02 §9：官方 SDK）
+    """MCP Server 入口（FR-1.3.x，stdio 传输）。
+
+    关键：stdio 模式**只走 stderr 不落文件**（04 §6.2.4 Sink 表 MCP 行）；
+    setup_logging("mcp") 不创建 ~/.skillos/logs/mcp.log，
+    只挂 stderr handler（T23 实现约束）。
+    """
+    setup_logging("mcp")
+    bind_op_id(component="mcp_server")
+    log.info(
+        "mcp_session_opened",
+    )
+    try:
+        mcp.run()  # stdio 传输（02 §9：官方 SDK）
+    finally:
+        log.info(
+            "mcp_session_closed",
+        )
 
 
 if __name__ == "__main__":

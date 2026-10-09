@@ -17,6 +17,10 @@ import re
 import unicodedata
 from pathlib import Path
 
+from skillos.core.logging import get_logger
+
+log = get_logger("skillos.services.fs")
+
 _ERROR_CODE = "PATH_TRAVERSAL"
 
 # Windows 保留设备名（不含扩展名部分比较）
@@ -44,14 +48,30 @@ class PathTraversalError(Exception):
 
 def _validate_component(rel: str, part: str) -> None:
     if part in ("", ".", ".."):
+        log.warning(
+            "path_traversal_rejected",
+            origin_path=rel, reason="empty or dot component",
+        )
         raise PathTraversalError(rel, "empty or dot component")
     if _ILLEGAL_CHARS.search(part):
+        log.warning(
+            "path_traversal_rejected",
+            origin_path=rel, reason="illegal character",
+        )
         raise PathTraversalError(rel, "illegal character")
     stem = part.split(".", 1)[0].upper()
     if stem in _WINDOWS_RESERVED:
         # CON.txt 也是保留名（stem 比较），macOS 上 CON 合法但按统一口径拒绝
+        log.warning(
+            "path_traversal_rejected",
+            origin_path=rel, reason="reserved device name",
+        )
         raise PathTraversalError(rel, "reserved device name")
     if part.endswith((" ", ".")):  # Windows 目录项不允许结尾空格/点
+        log.warning(
+            "path_traversal_rejected",
+            origin_path=rel, reason="trailing space or dot",
+        )
         raise PathTraversalError(rel, "trailing space or dot")
 
 
@@ -59,21 +79,44 @@ def safe_path(root: Path, rel: str) -> Path:
     """把外部传入的相对路径解析为受限于 root 的绝对路径。
 
     绝对路径、含 .. 逃逸、经 symlink 逃逸、命中保留名 —— 一律抛 PathTraversalError。
+
+    所有拒绝路径都记 WARNING `path_traversal_rejected`（**只记 origin_path，不记
+    解析后的绝对路径** —— 不回显目录结构，T23 / 04 §6.2.6）。
     """
     if not isinstance(rel, str) or not rel.strip():
+        log.warning(
+            "path_traversal_rejected",
+            origin_path=rel, reason="empty path",
+        )
         raise PathTraversalError(str(rel), "empty path")
     if Path(rel).is_absolute() or rel.startswith(("/", "\\")):
+        log.warning(
+            "path_traversal_rejected",
+            origin_path=rel, reason="absolute path not allowed",
+        )
         raise PathTraversalError(rel, "absolute path not allowed")
     if "\x00" in rel:
+        log.warning(
+            "path_traversal_rejected",
+            origin_path=rel, reason="null byte",
+        )
         raise PathTraversalError(rel, "null byte")
 
-    for part in re.split(r"[\\/]+", rel):
-        _validate_component(rel, part)
+    try:
+        for part in re.split(r"[\\/]+", rel):
+            _validate_component(rel, part)
 
-    base = root.resolve()
-    target = (base / rel).resolve()  # 展开 symlink 与 Windows 8.3 短名
-    if not target.is_relative_to(base):
-        raise PathTraversalError(rel, "escapes root")
+        base = root.resolve()
+        target = (base / rel).resolve()  # 展开 symlink 与 Windows 8.3 短名
+        if not target.is_relative_to(base):
+            log.warning(
+                "path_traversal_rejected",
+                origin_path=rel, reason="escapes root",
+            )
+            raise PathTraversalError(rel, "escapes root")
+    except PathTraversalError:
+        # 内层 _validate_component 已记日志；外层（escapes root）也已在上面记过
+        raise
     return target
 
 

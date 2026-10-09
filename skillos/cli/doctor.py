@@ -3,10 +3,13 @@
 九项逐项 ok / warn / fail。fail 数返回给调用方决定退出码；warn 不阻塞。
 第 6 项（WSL 边界）是演示防砸关键：daemon 跑 WSL 而 Runtime 在 Windows 时
 同步会「成功」但 Agent 看不到效果（05 P0-6 / NFR-7.7）。
+
+第 11 项（T23 / 04 §6.2.7）：日志目录可写 + 单文件大小 + 最近 ERROR 数。
 """
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -194,8 +197,76 @@ def _check_git_identity(engine: LocalEngine) -> CheckResult:
     return CheckResult("溯源身份", "ok", f"user.name={name}")
 
 
+def _check_logs(home: Path) -> CheckResult:
+    """第 11 项（FR-1.1.11 / 04 §6.2.7）：日志目录可写 + 单文件大小 + 最近 ERROR 数。
+
+    检查项：
+    - `~/.skillos/logs/` 存在 + 当前用户可写
+    - 当前 `<mode>.log` < 10MB（否则已轮转异常）
+    - 最近 100 行内 ERROR / CRITICAL 数 > 10 → warn
+    """
+    log_dir = home / ".skillos" / "logs"
+    if not log_dir.exists():
+        return CheckResult(
+            "日志系统", "warn",
+            f"{log_dir} 不存在（首次运行 daemon / api / mcp 时创建）",
+        )
+    if not os.access(log_dir, os.R_OK | os.W_OK):
+        return CheckResult(
+            "日志系统", "fail",
+            f"{log_dir} 不可读或不可写",
+        )
+    # 单文件大小（取 daemon.log 或最新）
+    over_size: list[str] = []
+    for p in sorted(log_dir.glob("*.log")):
+        try:
+            size = p.stat().st_size
+        except OSError:
+            continue
+        if size >= 10 * 1024 * 1024:
+            over_size.append(f"{p.name}={size // 1024 // 1024}MB")
+    if over_size:
+        return CheckResult(
+            "日志系统", "fail",
+            f"单文件超 10MB（轮转异常）: {', '.join(over_size)}",
+        )
+    # 最近 ERROR 数
+    error_count = 0
+    candidates = sorted(log_dir.glob("*.log"), key=lambda p: p.stat().st_mtime,
+                        reverse=True)
+    if candidates:
+        target = candidates[0]
+        try:
+            lines = target.read_text(encoding="utf-8", errors="replace").splitlines()[-100:]
+            for line in lines:
+                # 兼容 JSON（"level":"ERROR"）和 key=value（level=ERROR）
+                try:
+                    rec = json.loads(line)
+                    lv = str(rec.get("level", "")).upper()
+                except (ValueError, TypeError):
+                    lv = ""
+                    for kv in line.split():
+                        if kv.startswith("level="):
+                            lv = kv.split("=", 1)[1].upper()
+                            break
+                if lv in ("ERROR", "CRITICAL"):
+                    error_count += 1
+        except OSError:
+            pass
+    if error_count > 10:
+        return CheckResult(
+            "日志系统", "warn",
+            f"{target.name} 最近 100 行含 {error_count} 条 ERROR/CRITICAL",
+        )
+    return CheckResult(
+        "日志系统", "ok",
+        f"目录 {log_dir} 可写，文件大小正常"
+        + (f"，最近 100 行 {error_count} 条 ERROR" if error_count else ""),
+    )
+
+
 def run_doctor(console: Console) -> int:
-    """执行十项检查并打印。返回 fail 数（>0 → CLI 退出码 1）。"""
+    """执行十一项检查并打印。返回 fail 数（>0 → CLI 退出码 1）。"""
     home = resolve_home()
     paths = default_env(home)
     engine = LocalEngine(paths, home=home)
@@ -210,6 +281,7 @@ def run_doctor(console: Console) -> int:
         _check_runtime_dirs(engine),
         _check_token(engine),
         _check_unmanaged_assets(engine),
+        _check_logs(home),  # 第 11 项：日志系统（T23 / 04 §6.2.7）
     ]
     fails = 0
     for r in results:

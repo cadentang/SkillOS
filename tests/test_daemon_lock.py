@@ -19,11 +19,11 @@ def test_second_instance_exits_first_wins(tmp_path, caplog):
     first = acquire_instance_lock(tmp_path)
     assert first.is_locked
 
-    # 第二实例：1s 内抢不到 → SystemExit(1)，报错里带持有者 pid
+    # 第二实例：1s 内抢不到 → SystemExit(1)，结构化事件 instance_lock_busy（T23）
     with pytest.raises(SystemExit) as ei, caplog.at_level(logging.ERROR):
         acquire_instance_lock(tmp_path)
     assert ei.value.code == 1
-    assert "已有 daemon 实例" in caplog.text
+    assert "instance_lock_busy" in caplog.text
 
     # 旧进程退出释放后，新实例可正常启动
     first.release()

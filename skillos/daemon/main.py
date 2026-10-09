@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import os
 import platform
 import socket
@@ -28,19 +27,46 @@ import websockets
 from filelock import FileLock, Timeout
 
 from skillos.core.constants import LOCK_TIMEOUT_S, WS_BACKOFF_MAX_S, WS_TASK_OPS
+from skillos.core.logging import (
+    bind_op_id,
+    get_logger,
+    reset_op_context,
+    setup_logging,
+)
 from skillos.services.engine import (
     LocalEngine,
     SkillValidationError,
+    all_adapters,
     default_env,
     resolve_home,
 )
 from skillos.services.locking import write_lock
 
-log = logging.getLogger("skillos.daemon")
+log = get_logger("skillos.daemon")
 
 HEARTBEAT_S = 20
 REPORT_INTERVAL_S = 60
 _REQ_LRU_SIZE = 512
+
+
+def _parse_log_json(line: str) -> dict | None:
+    """解析一行 JSON 日志。key=value 形态暂不解析（云端走 JSON 渲染）。
+
+    返回的 dict 含 ts / logger / level / event / op_id 等核心字段；
+    其余字段（如 duration_ms / path / error_code）原样带过去。
+    """
+    line = line.strip()
+    if not line or not line.startswith("{"):
+        return None
+    import json as _json
+
+    try:
+        rec = _json.loads(line)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(rec, dict):
+        return None
+    return rec
 
 
 class RequestDedup:
@@ -244,6 +270,23 @@ class TaskExecutor:
             except SkillValidationError as e:
                 return {"ok": False, "error": {"code": e.code, "message": str(e)}}
             return {"ok": True, "data": result}
+        if op == "logs":
+            # P5 日志查看（FR-1.1.12）：具名领域操作，不暴露任意文件读取
+            return self._logs(params)
+        if op == "runtimes_list":
+            # P3 Settings 页（FR-2.4.10 / T26 / FR-1.0.32）：白名单探测 + 4 builtin
+            return {"ok": True, "data": engine.list_potential_runtimes()}
+        if op == "runtime_diagnose":
+            # FR-1.0.33：custom Runtime 路径诊断（只读，不动磁盘）
+            try:
+                return {"ok": True, "data": engine.diagnose_custom_path(
+                    str(params.get("root_path") or "")
+                )}
+            except Exception as e:  # noqa: BLE001
+                return {"ok": False, "error": {"code": "IO", "message": str(e)}}
+        if op == "protocol_status":
+            # FR-1.0.29 / T18：sticky + HEAD trailer + 一致性
+            return {"ok": True, "data": engine.protocol_status()}
         return {"ok": False, "error": {"code": "INVALID_INPUT",
                                        "message": f"未知操作: {op}"}}
 
@@ -365,6 +408,66 @@ class TaskExecutor:
             ],
         }}
 
+    def _logs(self, params: dict) -> dict:
+        """读取本地日志（FR-1.1.12）。
+
+        路径固定为 `~/.skillos/logs/<mode>.log`，不允许任意路径（避免任意文件读取）；
+        mode 白名单化（与 ws/api 路由一致）；tail 上限 5000。
+        """
+        mode = str(params.get("mode") or "daemon")
+        if mode not in {"daemon", "api", "mcp"}:
+            return {"ok": False, "error": {
+                "code": "INVALID_INPUT", "message": f"未知 mode: {mode}",
+            }}
+        try:
+            tail = max(0, min(int(params.get("tail") or 100), 5000))
+        except (TypeError, ValueError):
+            tail = 100
+        min_level = str(params.get("level") or "DEBUG").upper()
+        op_filter = str(params.get("op_id") or "") or None
+
+        log_path = self.engine.home / ".skillos" / "logs" / f"{mode}.log"
+        if not log_path.exists():
+            return {"ok": True, "data": {
+                "events": [], "skipped": 0, "path": str(log_path),
+                "missing": True,
+            }}
+        try:
+            content = log_path.read_text(encoding="utf-8", errors="replace")
+        except OSError as e:
+            return {"ok": False, "error": {
+                "code": "IO", "message": f"读日志失败: {e}",
+            }}
+        lines = content.splitlines()
+        if tail > 0:
+            lines = lines[-tail:]
+        events: list[dict] = []
+        skipped = 0
+        levels_order = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+        try:
+            min_idx = levels_order.index(min_level)
+        except ValueError:
+            min_idx = 0
+        for raw in lines:
+            rec = _parse_log_json(raw)
+            if rec is None:
+                skipped += 1
+                continue
+            lv = str(rec.get("level") or "").upper()
+            try:
+                lv_idx = levels_order.index(lv)
+            except ValueError:
+                lv_idx = 0
+            if lv_idx < min_idx:
+                continue
+            if op_filter and op_filter not in raw:
+                continue
+            events.append(rec)
+        return {"ok": True, "data": {
+            "events": events, "skipped": skipped,
+            "path": str(log_path), "count": len(events),
+        }}
+
 
 def _all_query():
     from skillos.store.index_repo import SkillQuery
@@ -464,9 +567,8 @@ def acquire_instance_lock(home: Path) -> FileLock:
         except OSError:
             pass
         log.error(
-            "本机已有 daemon 实例在运行%s，拒绝启动第二实例。"
-            "如需重启，请先停止旧进程（pid 见 ~/.skillos/daemon.lock）。",
-            f"（pid {holder}）" if holder else "",
+            "instance_lock_busy",
+            holder_pid=holder or None,
         )
         sys.exit(1)
     return lock
@@ -497,7 +599,10 @@ async def run(cloud_url: str, pair_code: str | None = None,
     problems = check_environment(home)
     if problems:
         for p in problems:
-            log.error("环境校验失败: %s", p)
+            log.error(
+                "env_check_failed",
+                problem=p,
+            )
         sys.exit(1)
 
     # 单实例锁必须持满进程生命周期（变量只作持有引用，故下划线开头）
@@ -510,13 +615,25 @@ async def run(cloud_url: str, pair_code: str | None = None,
     backoff = 1.0
     user_id: str | None = None
 
+    # 一次 daemon 启动一个 op_id（生命周期）
+    bind_op_id(component="daemon", agent_id=agent_id, cloud_url=cloud_url)
+    log.info(
+        "daemon_started",
+        cloud_url=cloud_url, agent_id=agent_id,
+        has_token=bool(token), has_pair_code=bool(pair_code),
+    )
+
     while True:
         try:
             async with websockets.connect(cloud_url, max_size=32 * 1024 * 1024) as ws:
-                log.info("已连接 %s", cloud_url)
+                bind_op_id(component="daemon.ws")  # 每次连接一个新 op_id
+                log.info(
+                    "ws_connected",
+                    cloud_url=cloud_url,
+                )
                 hello: dict = {
                     "type": "hello", "agent_id": agent_id, "version": "0.1.0",
-                    "runtimes": ["claude", "agents", "workbuddy", "codex"],
+                    "runtimes": [a.key for a in all_adapters()],
                     "platform": platform.system().lower(),
                 }
                 if token:
@@ -524,27 +641,39 @@ async def run(cloud_url: str, pair_code: str | None = None,
                 elif pair_code:
                     hello["pair_code"] = pair_code
                 else:
-                    log.error("无 token 且未提供 --pair，无法认证")
+                    log.error(
+                        "auth_missing",
+                    )
                     sys.exit(1)
                 await ws.send(json.dumps(hello))
 
                 # 握手响应：paired（新 token）/ welcome（老 token）/ error
                 ack = json.loads(await asyncio.wait_for(ws.recv(), timeout=15))
                 if ack.get("type") == "paired":
+                    bind_op_id(component="auth_pair")  # 配对一个新 op_id
+                    log.info(
+                        "pair_started",
+                    )
                     token = ack["token"]
                     save_token(home, token)
                     user_id = ack.get("user_id")
-                    log.info("配对成功，token 已保存（%s）", token_path(home))
+                    log.info(
+                        "pair_succeeded",
+                        user_id=user_id,
+                    )
                 elif ack.get("type") == "welcome":
                     user_id = ack.get("user_id")
                 else:
-                    log.error("握手被拒: %s", ack.get("error"))
+                    log.error(
+                        "auth_failed",
+                        reason=str(ack.get("error")),
+                    )
                     sys.exit(1)
                 backoff = 1.0
 
                 # 连接即上报一次漂移（FR-1.2.6）。
                 # 全扫是重活（git 子进程 × N + 全量 hash，秒级~分钟级），
-                # 必须放线程池：同步阻塞事件循环会卡死 websockets 的
+                # 必须放线程池：同步阻塞事件循环会卡死爱websockets 的
                 # ping/pong（默认 20s 间隔），40s 后客户端自判死链断开
                 # → 重连 → 再全扫 → 重连风暴（徽标永远闪断的根因）。
                 payload = await asyncio.to_thread(drift_payload, engine)
@@ -583,6 +712,10 @@ async def run(cloud_url: str, pair_code: str | None = None,
                             request_id = msg.get("request_id")
                             if not request_id:
                                 # 守卫③：无 request_id 直接拒绝（07 N12）
+                                log.warning(
+                                    "task_rejected_no_request_id",
+                                    task_id=msg.get("task_id"),
+                                )
                                 await ws.send(json.dumps({
                                     "type": "result",
                                     "task_id": msg.get("task_id"),
@@ -592,14 +725,39 @@ async def run(cloud_url: str, pair_code: str | None = None,
                                 }))
                                 continue
                             if executor.dedup.seen(request_id):
-                                log.info("重复任务跳过（request_id=%s）", request_id)
+                                log.info(
+                                    "task_dedup_skipped",
+                                    request_id=request_id,
+                                    op=msg.get("op"),
+                                )
                                 continue
+                            op_name = str(msg.get("op") or "")
+                            # 任务级 op_id（与上层 tags 合并而非覆盖）
+                            bind_op_id(component="task", op=op_name, request_id=request_id)
+                            log.info(
+                                "task_started",
+                                op=op_name, request_id=request_id,
+                                task_id=msg.get("task_id"),
+                            )
                             executor.dedup.mark(request_id, msg.get("task_id"))
                             # 任务执行（scan/status/push 都是重活）放线程池：
                             # status 全扫秒级起步，同步跑会卡死 ping/pong 断链
+                            t0 = time.monotonic()
                             result = await asyncio.to_thread(
                                 executor.execute,
-                                msg.get("op"), msg.get("params") or {},
+                                op_name, msg.get("params") or {},
+                            )
+                            duration_ms = int((time.monotonic() - t0) * 1000)
+                            ok = bool(result.get("ok"))
+                            error_code = (
+                                (result.get("error") or {}).get("code")
+                                if not ok else None
+                            )
+                            log.info(
+                                "task_completed",
+                                op=op_name, request_id=request_id,
+                                ok=ok, error_code=error_code,
+                                duration_ms=duration_ms,
                             )
                             payload = {
                                 "type": "result",
@@ -612,7 +770,7 @@ async def run(cloud_url: str, pair_code: str | None = None,
                             # 不等 60s 周期 —— Web 端要立刻看到矩阵收敛）。
                             # 注意此处不能用 TaskExecutor.WRITE_OPS（那是"executor 层
                             # 需补锁"的集合）；这里要的是"产生写入"的集合。
-                            if msg.get("op") in {"push", "rollback", "pull", "tag_create"}:
+                            if op_name in {"push", "rollback", "pull", "tag_create"}:
                                 p2 = await asyncio.to_thread(drift_payload, engine)
                                 await ws.send(json.dumps({
                                     "type": "event", "event": "drift_changed",
@@ -622,14 +780,24 @@ async def run(cloud_url: str, pair_code: str | None = None,
                 finally:
                     hb.cancel()
                     rep.cancel()
+                    reset_op_context()
+                    log.info(
+                        "ws_disconnected",
+                    )
         except websockets.ConnectionClosed as e:
             # 4001 = 同 agent_id 新连接接管（FR-1.2.7）。退出而非重连：
             # 两个实例会互踢（踢→1s 重连→踢回），形成重连风暴 + 池连接泄漏。
             if e.rcvd is not None and e.rcvd.code == 4001:
-                log.error("被同 agent_id 的新连接接管（4001）——"
-                          "是否启动了第二个 daemon 实例？本实例退出。")
+                log.error(
+                    "ws_superseded_4001",
+                    reason="同 agent_id 新连接接管——是否启动了第二个 daemon 实例？",
+                )
                 sys.exit(1)
-            log.warning("连接断开（%s），%ss 后重连", type(e).__name__, backoff)
+            log.warning(
+                "ws_reconnect",
+                reason=type(e).__name__,
+                backoff_s=backoff,
+            )
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, WS_BACKOFF_MAX_S)
         except (
@@ -637,7 +805,11 @@ async def run(cloud_url: str, pair_code: str | None = None,
             OSError,
             TimeoutError,
         ) as e:
-            log.warning("连接断开（%s），%ss 后重连", type(e).__name__, backoff)
+            log.warning(
+                "ws_reconnect",
+                reason=type(e).__name__,
+                backoff_s=backoff,
+            )
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, WS_BACKOFF_MAX_S)
         except SystemExit:
@@ -645,12 +817,19 @@ async def run(cloud_url: str, pair_code: str | None = None,
 
 
 def main(cloud_url: str | None = None, pair_code: str | None = None) -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
+    """daemon 入口（FR-1.2.x）。"""
+    from skillos.services.engine import resolve_home
+
+    home = resolve_home()
+    setup_logging("daemon", home=home)
     url = cloud_url or "ws://127.0.0.1:9080/ws/agent"
-    asyncio.run(run(url, pair_code))
+    try:
+        asyncio.run(run(url, pair_code))
+    except KeyboardInterrupt:
+        log.info(
+            "daemon_stopped",
+            reason="KeyboardInterrupt",
+        )
 
 
 if __name__ == "__main__":

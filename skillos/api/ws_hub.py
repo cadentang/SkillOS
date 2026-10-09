@@ -118,8 +118,12 @@ class WsHub:
             return
         if not task.future.done():
             task.future.set_result(payload)
+        # op 字段（04 §4.2）：前端据此区分「写任务完成」与「读任务完成」——
+        # 只对写集失效 drift/gate。无 op 时（旧前端忽略未知字段）不炸；
+        # 曾因前端把一切 task_done 当数据变更信号，读任务重取自身又产生
+        # task_done，形成 gate-summary/status 请求自激风暴。
         await self.broadcast_ui({
-            "type": "task_done", "task_id": task.task_id,
+            "type": "task_done", "task_id": task.task_id, "op": task.op,
             "summary": {"ok": bool(payload.get("ok"))},
         }, user_id=task.user_id)
 

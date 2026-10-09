@@ -48,11 +48,14 @@ from skillos.core.fs.importer import ImportPlan, plan_import
 from skillos.core.fs.safe_path import path_key, safe_path
 from skillos.core.fs.scan import scan_roots
 from skillos.core.fs.version import GitError, GitRepo
+from skillos.core.logging import get_logger
 from skillos.core.model import DriftReport, DriftState, RootSpec, SkillSnapshot
 from skillos.services.locking import write_lock
 from skillos.store.db import init_schema, make_engine, make_session_factory, sqlite_url
 from skillos.store.index_repo import SkillQuery, SkillRecord, SqliteIndexStore
 from skillos.store.models import RuntimeBinding
+
+log = get_logger("skillos.services.engine")
 
 
 class ConflictDecision(StrEnum):
@@ -170,7 +173,19 @@ class LocalEngine:
         return specs
 
     def scan_all(self) -> list:
-        return scan_roots(self._root_specs())
+        log.info(
+            "scan_started",
+        )
+        found = scan_roots(self._root_specs())
+        # ScannedSkill 无 slug 字段，目录名取 rel_path 末段（同 importer._slug_of）
+        log.info(
+            "scan_completed",
+            found_count=len(found),
+            skill_count=len(
+                {f.rel_path.rsplit("/", 1)[-1] for f in found}
+            ),
+        )
+        return found
 
     def _known_candidates(self) -> list[IdentityCandidate]:
         known: list[IdentityCandidate] = []
@@ -188,13 +203,32 @@ class LocalEngine:
 
     def import_skills(self, runtimes: list[str] | None = None) -> ImportPlan:
         """纳管（04 §2.2.5）。canonical = 主副本字节级拷贝（不归一化）；不自动 push。"""
+        log.info(
+            "import_started",
+            runtimes=runtimes,
+        )
         scanned = [s for s in self.scan_all() if runtimes is None or s.runtime_key in runtimes]
+        log.info(
+            "scan_completed",
+            found_count=len(scanned),
+            skill_count=len({s.rel_path.rsplit("/", 1)[-1] for s in scanned}),
+        )
         plan = plan_import(scanned, self._known_candidates())
-        with write_lock(self.paths.lock_dir):
+        with write_lock(self.paths.lock_dir, operation="import_skills"):
             for planned in plan.skills:
                 primary_dir = planned.primary.root / planned.primary.rel_path
                 self._commit_canonical(planned.slug, primary_dir)
                 self._record_import_binding(planned)
+        for c in plan.conflicts:
+            log.warning(
+                "import_conflict",
+                slug=c.slug,
+            )
+        log.info(
+            "import_completed",
+            imported=len(plan.skills),
+            conflicts=len(plan.conflicts),
+        )
         return plan
 
     def _commit_canonical(self, slug: str, skill_dir: Path) -> None:
@@ -289,6 +323,14 @@ class LocalEngine:
                     ))
             else:
                 out.extend(cells)
+        # drift_detected 聚合（DEBUG 级，太多时升 INFO 会刷屏）
+        drift_cells = [c for c in out if str(c.state) not in ("DriftState.SYNCED", "SYNCED")]
+        if drift_cells:
+            log.debug(
+                "drift_detected",
+                drift_count=len(drift_cells),
+                total_cells=len(out),
+            )
         return out
 
     def _one_cell(
@@ -373,15 +415,32 @@ class LocalEngine:
         confirmed_removals: frozenset[str] | None = None,
     ) -> DistributeReport:
         """一键分发（04 §5.2 时序：门禁 → 跨目标前置全检 → 逐目标事务 → 落库）。"""
+        log.info(
+            "sync_push_started",
+            skill_slug=slug, runtime_keys=runtime_keys, dry_run=dry_run,
+        )
         row = self.db.get_skill_by_slug(slug)
         if row is None:
+            log.warning(
+                "sync_push_failed",
+                skill_slug=slug, error_code="INVALID_INPUT",
+                detail="未纳管",
+            )
             raise ValueError(f"未纳管的 skill: {slug}（先 skillos import）")
-        with write_lock(self.paths.lock_dir):
+        with write_lock(self.paths.lock_dir, operation="push_skill"):
             head = self._head()
             snapshot = self.git.snapshot_at(head, slug)
             # 步骤 3：门禁（error 级拦截；--allow-gate-failure 只在 CLI，MCP 无此开关）
             gate = run_gate(snapshot, GateContext(known_slugs=self._all_slugs()))
             if gate.has_error and not allow_gate_failure:
+                log.warning(
+                    "gate_failed",
+                    skill_slug=slug,
+                    findings=[
+                        {"rule": f.rule, "level": str(f.level), "message": f.message}
+                        for f in gate.findings if f.level == "error"
+                    ],
+                )
                 return DistributeReport(
                     ok=False,
                     outcomes=[TargetOutcome(
@@ -420,6 +479,11 @@ class LocalEngine:
                 dry_run=dry_run,
             )
             if dry_run:
+                log.info(
+                    "dry_run_executed",
+                    op="sync_push", skill_slug=slug,
+                    held_count=sum(len(o.held_back_removals or []) for o in result.outcomes),
+                )
                 return result
             # 步骤 8/9：基线落库 + 审计（首 push 成功即转 distributed）
             for outcome in result.outcomes:
@@ -443,6 +507,24 @@ class LocalEngine:
                     skill_id=row.id, runtime_id=outcome.runtime_key, action="push",
                     from_state=None, to_state="synced",
                     detail={"skipped_assets": outcome.skipped_assets}, by="cli",
+                )
+            held_back_count = sum(len(o.held_back_removals or []) for o in result.outcomes)
+            if result.ok:
+                log.info(
+                    "sync_push_completed",
+                    skill_slug=slug,
+                    replaced_count=sum(1 for o in result.outcomes if o.ok),
+                    held_back_count=held_back_count,
+                )
+            else:
+                log.warning(
+                    "sync_push_failed",
+                    skill_slug=slug,
+                    error_code=next(
+                        (o.error_code for o in result.outcomes if o.error_code),
+                        "PUSH_FAILED",
+                    ),
+                    held_back_count=held_back_count,
                 )
             return result
 
@@ -470,10 +552,20 @@ class LocalEngine:
         写 canonical 工作树 + git commit；提交后跑门禁把逐条 findings 一并返回
         （保存不拦截——门禁拦 push，编辑期只提示，FR-1.0.11）。
         """
+        log.info(
+            "file_write_started",
+            skill_slug=slug, path=rel_path, bytes=len(content),
+            author=author,
+        )
         row = self.db.get_skill_by_slug(slug)
         if row is None:
+            log.warning(
+                "file_write_rejected",
+                skill_slug=slug, error_code="INVALID_INPUT",
+                reason="未纳管",
+            )
             raise ValueError(f"未纳管的 skill: {slug}")
-        with write_lock(self.paths.lock_dir):
+        with write_lock(self.paths.lock_dir, operation="write_file"):
             head = self._head()
             snapshot = self.git.snapshot_at(head, slug)
             current = next((f for f in snapshot.files if f.path == rel_path), None)
@@ -481,6 +573,12 @@ class LocalEngine:
                 hashlib.sha256(current.content).hexdigest() if current is not None else ""
             )
             if current_hash != base_hash:
+                log.warning(
+                    "stale_base_hash",
+                    skill_slug=slug, path=rel_path,
+                    current_hash_prefix=current_hash[:12],
+                    submitted_hash_prefix=base_hash[:12],
+                )
                 raise StaleWriteError(
                     f"base_hash 不匹配（当前 {current_hash[:12]}… ≠ 提交的 "
                     f"{base_hash[:12]}…），请重新加载后再编辑（FR-3.13）"
@@ -489,6 +587,10 @@ class LocalEngine:
             if current is not None and current_hash == hashlib.sha256(content).hexdigest():
                 # 幂等保存：内容未变（编辑器重复保存），不产生空 commit
                 gate = run_gate(snapshot, GateContext(known_slugs=self._all_slugs()))
+                log.info(
+                    "file_write_committed",
+                    skill_slug=slug, path=rel_path, idempotent=True,
+                )
                 return {
                     "commit": head,
                     "hash": current_hash,
@@ -501,9 +603,18 @@ class LocalEngine:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(content)
             commit = self.git.commit([f"skills/{slug}/{rel_path}"], message, author=author)
+            log.info(
+                "git_commit_created",
+                skill_slug=slug, path=rel_path, commit=commit[:12],
+                author=author, message=message,
+            )
             gate = run_gate(
                 self.git.snapshot_at(self._head(), slug),
                 GateContext(known_slugs=self._all_slugs()),
+            )
+            log.info(
+                "file_write_committed",
+                skill_slug=slug, path=rel_path, commit=commit[:12],
             )
             return {
                 "commit": commit,
@@ -529,27 +640,49 @@ class LocalEngine:
         - 不建 binding：未分发状态，首次 push 时建立（04 §2.2.5）。
         - 溯源走 git log（FR-1.0.22）；不写 sync_records（action 白名单无 create）。
         """
+        log.info(
+            "create_started",
+            skill_slug=slug, author=author,
+        )
         if not is_kebab(slug):
+            log.warning(
+                "create_rejected",
+                skill_slug=slug, error_code="SLUG_INVALID",
+            )
             raise SkillValidationError(
                 "SLUG_INVALID", f"slug 必须是 kebab-case（小写字母数字 + 连字符）: {slug!r}"
             )
         if not description.strip():
+            log.warning(
+                "create_rejected",
+                skill_slug=slug, error_code="VALIDATION",
+                reason="description 必填",
+            )
             raise SkillValidationError(
                 "VALIDATION", "description 必填（fm.description.required 为 error 级门禁）"
             )
         display_name = name.strip() or slug
-        with write_lock(self.paths.lock_dir):
+        with write_lock(self.paths.lock_dir, operation="create_skill"):
             existing = {
                 path_key(r.slug)
                 for r in self.db.list_skills(SkillQuery(limit=10000))
             }
             if path_key(slug) in existing:
+                log.warning(
+                    "create_rejected",
+                    skill_slug=slug, error_code="SLUG_EXISTS",
+                )
                 raise SkillValidationError(
                     "SLUG_EXISTS", f"slug 已存在（含大小写归一化比对）: {slug}"
                 )
             dest = self.paths.repo_root / "skills" / slug / "SKILL.md"
             if dest.parent.exists():
                 # 索引里没有但磁盘有：重建守卫同源语义——判断不了就报错，不许猜
+                log.warning(
+                    "create_rejected",
+                    skill_slug=slug, error_code="SLUG_EXISTS",
+                    reason="canonical 目录已存在但未纳管",
+                )
                 raise SkillValidationError(
                     "SLUG_EXISTS", f"canonical 目录已存在但未纳管: skills/{slug}"
                 )
@@ -565,6 +698,11 @@ class LocalEngine:
             gate = run_gate(
                 self.git.snapshot_at(self._head(), slug),
                 GateContext(known_slugs=self._all_slugs()),
+            )
+            log.info(
+                "create_completed",
+                skill_slug=slug, commit=commit[:12], author=author,
+                gate_has_error=gate.has_error,
             )
             return {
                 "slug": slug,
@@ -591,8 +729,16 @@ class LocalEngine:
         - 溯源：delete commit 进 git log（FR-1.0.22），历史仍可查；
           不写 sync_records（action 白名单无 delete）。
         """
+        log.info(
+            "delete_started",
+            skill_slug=slug, dry_run=dry_run, author=author,
+        )
         row = self.db.get_skill_by_slug(slug)
         if row is None:
+            log.warning(
+                "delete_failed",
+                skill_slug=slug, error_code="NOT_FOUND",
+            )
             raise SkillValidationError("NOT_FOUND", f"未纳管的 skill: {slug}")
         dest = self.paths.repo_root / "skills" / slug
 
@@ -615,6 +761,10 @@ class LocalEngine:
                 if plan["stray"]
                 else f"HEAD 中列出的文件在磁盘上缺失: {plan['missing']}"
             )
+            log.warning(
+                "delete_failed",
+                skill_slug=slug, error_code="RESIDUE", detail=detail,
+            )
             return {
                 "ok": False, "error_code": "RESIDUE",
                 "detail": f"canonical 与 HEAD 不一致，须先处理后再删除（{detail}）",
@@ -622,17 +772,32 @@ class LocalEngine:
             }
         if not plan["removals"]:
             # 索引说有、HEAD 说无：不一致，报错不猜（同 rebuild 守卫语义）
+            log.warning(
+                "delete_failed",
+                skill_slug=slug, error_code="RESIDUE",
+                detail="HEAD 下无该 skill 的文件",
+            )
             return {
                 "ok": False, "error_code": "RESIDUE",
                 "detail": "canonical HEAD 下无该 skill 的文件（索引与 git 不一致）",
                 "removals": [],
             }
         if dry_run:
+            log.info(
+                "delete_removals_listed",
+                skill_slug=slug,
+                removals_count=len(plan["removals"]),
+            )
             return {"ok": True, "dry_run": True, "removals": plan["removals"]}
 
-        with write_lock(self.paths.lock_dir):
+        with write_lock(self.paths.lock_dir, operation="delete_skill"):
             plan = _plan()  # 锁内重算（FR-1.3.7：预览即真跑会遇到的一切）
             if plan["stray"] or plan["missing"] or not plan["removals"]:
+                log.warning(
+                    "delete_failed",
+                    skill_slug=slug, error_code="RESIDUE",
+                    detail="预览与真跑之间 canonical 发生变化",
+                )
                 return {
                     "ok": False, "error_code": "RESIDUE",
                     "detail": "预览与真跑之间 canonical 发生变化，请重试 dry_run",
@@ -641,6 +806,12 @@ class LocalEngine:
             removals = plan["removals"]
             confirmed = set(confirmed_removals or [])
             if set(removals) != confirmed:
+                log.warning(
+                    "write_policy_rejected",
+                    op="delete", skill_slug=slug,
+                    error_code="REMOVALS_UNCONFIRMED",
+                    missing_count=len([p for p in removals if p not in confirmed]),
+                )
                 return {
                     "ok": False, "error_code": "REMOVALS_UNCONFIRMED",
                     "detail": "删除将使下列文件从 canonical 消失，须在 Web 逐条确认后重试",
@@ -650,6 +821,11 @@ class LocalEngine:
             for rel in removals:
                 p = safe_path(dest, rel)
                 if not p.is_file():
+                    log.warning(
+                        "delete_failed",
+                        skill_slug=slug, error_code="RESIDUE",
+                        detail=f"待删文件在执行前消失: {rel}",
+                    )
                     return {
                         "ok": False, "error_code": "RESIDUE",
                         "detail": f"待删文件在执行前消失: {rel}",
@@ -670,8 +846,18 @@ class LocalEngine:
             commit = self.git.commit(
                 [f"skills/{slug}"], f"skillos: delete {slug}", author=author
             )
+            log.info(
+                "git_commit_created",
+                skill_slug=slug, commit=commit[:12],
+                author=author, message=f"skillos: delete {slug}",
+            )
             self.db.delete_bindings(row.id)
             self.db.delete_skill(row.id)
+            log.info(
+                "delete_completed",
+                skill_slug=slug, commit=commit[:12], author=author,
+                replaced_count=len(removals),
+            )
             return {"ok": True, "commit": commit, "removals": removals}
 
     def sandbox_reset(self) -> dict:
@@ -689,12 +875,23 @@ class LocalEngine:
           持锁，在本方法锁外顺序调用（同进程双 FileLock 会自锁，实测踩坑）。
         - reset commit 即溯源（FR-1.0.22）：重置本身也写进 git log。
         """
+        log.info(
+            "sandbox_reset_started",
+        )
         if not self.is_sandbox:
+            log.warning(
+                "sandbox_reset_failed",
+                error_code="NOT_SANDBOX",
+            )
             raise SkillValidationError(
                 "NOT_SANDBOX", "仅沙盒模式（SKILLOS_SANDBOX=1）可重置"
             )
         seed = self.home / ".skillos-seed" / "runtime"
         if not seed.is_dir():
+            log.warning(
+                "sandbox_reset_failed",
+                error_code="SEED_MISSING", seed=str(seed),
+            )
             raise SkillValidationError(
                 "SEED_MISSING", f"预置数据目录不存在: {seed}（reset ≠ 清空，拒绝执行）"
             )
@@ -704,12 +901,17 @@ class LocalEngine:
         for rt in runtimes:
             root = Path(rt.root_path).resolve()
             if home_root not in root.parents:
+                log.warning(
+                    "sandbox_reset_failed",
+                    error_code="BOUNDARY",
+                    runtime_key=rt.key, root=str(root),
+                )
                 raise SkillValidationError(
                     "BOUNDARY",
                     f"runtime root 越出容器根，拒绝重置: {rt.key} -> {root}",
                 )
 
-        with write_lock(self.paths.lock_dir):
+        with write_lock(self.paths.lock_dir, operation="sandbox_reset"):
             # 1. runtime：deploy 根清空，从 seed/<key>/ 复制
             for rt in runtimes:
                 root = Path(rt.root_path)
@@ -740,12 +942,22 @@ class LocalEngine:
         for r in self.db.list_skills(SkillQuery(limit=10000)):
             report = self.push_skill(r.slug)
             if not report.ok:
+                log.error(
+                    "sandbox_reset_failed",
+                    error_code="PUSH_FAILED",
+                    skill_slug=r.slug,
+                    detail=[(o.error_code, o.detail) for o in report.outcomes],
+                )
                 raise RuntimeError(
                     f"沙盒重置后 push 失败: {r.slug} "
                     f"{[(o.error_code, o.detail) for o in report.outcomes]}"
                 )
             restored.append(r.slug)
         commit = self._head()
+        log.info(
+            "sandbox_reset_completed",
+            restored_count=len(restored), commit=commit[:12],
+        )
         return {"restored": True, "skills": sorted(restored), "commit": commit}
 
     # ------------------------------------------------ 版本管理（P4，FR-2.2.8 / 1.0.22 / 1.0.26）
@@ -765,12 +977,26 @@ class LocalEngine:
           另落 sync_records（NFR-9：每次回滚均写操作账本）。
         - FR-1.3.7：dry_run 与真跑共用 `_rb_plan` 同一判据，锁内重算。
         """
+        log.info(
+            "rollback_started",
+            skill_slug=slug, ref=ref, dry_run=dry_run, author=author,
+        )
         row = self.db.get_skill_by_slug(slug)
         if row is None:
+            log.warning(
+                "rollback_failed",
+                skill_slug=slug, error_code="INVALID_INPUT",
+                reason="未纳管",
+            )
             raise ValueError(f"未纳管的 skill: {slug}")
         try:
             target = self.git.resolve_ref(ref)
         except GitError as e:
+            log.warning(
+                "rollback_failed",
+                skill_slug=slug, ref=ref, error_code="INVALID_INPUT",
+                reason=f"无法解析 ref: {e}",
+            )
             raise ValueError(f"无法解析目标版本 {ref}: {e}") from e
 
         def _rb_plan() -> dict:
@@ -788,18 +1014,35 @@ class LocalEngine:
 
         plan = _rb_plan()
         if not (plan["removals"] or plan["changed"] or plan["restored"]):
+            log.info(
+                "rollback_completed",
+                skill_slug=slug, noop=True,
+            )
             return {"ok": True, "noop": True, "removals": [], "changed": [], "restored": []}
         preview = {"ok": True, "dry_run": True, "target": target, **plan}
         if dry_run:
+            log.info(
+                "dry_run_executed",
+                op="rollback", skill_slug=slug,
+                removals_count=len(plan["removals"]),
+                changed_count=len(plan["changed"]),
+                restored_count=len(plan["restored"]),
+            )
             return preview
 
-        with write_lock(self.paths.lock_dir):
+        with write_lock(self.paths.lock_dir, operation="rollback_skill"):
             # 锁内重算（FR-1.3.7：预览即真跑会遇到的一切）
             plan = _rb_plan()
             removals = plan["removals"]
             confirmed = set(confirmed_removals or [])
             if removals and set(removals) != confirmed:
                 missing = [p for p in removals if p not in confirmed]
+                log.warning(
+                    "write_policy_rejected",
+                    op="rollback", skill_slug=slug,
+                    error_code="REMOVALS_UNCONFIRMED",
+                    missing_count=len(missing),
+                )
                 return {
                     "ok": False, "error_code": "REMOVALS_UNCONFIRMED",
                     "detail": "回滚将使下列文件消失，须在 Web 逐条确认后重试",
@@ -808,12 +1051,28 @@ class LocalEngine:
             if not (plan["removals"] or plan["changed"] or plan["restored"]):
                 return {"ok": True, "noop": True,
                         "removals": [], "changed": [], "restored": []}
+            log.info(
+                "rollback_auto_snapshot",
+                skill_slug=slug, ref=ref,
+                reason="FR-1.0.10 安全快照",
+            )
             commit = self.git.rollback(target, [f"skills/{slug}"], author=author)
+            log.info(
+                "git_commit_created",
+                skill_slug=slug, commit=commit[:12],
+                author=author, message=f"rollback to {target[:12]}",
+            )
             # NFR-9：回滚进操作账本（action 白名单 ck_sync_action 含 rollback）
             self.db.record_sync(
                 skill_id=row.id, runtime_id=None, action="rollback",
                 from_state=None, to_state=None,
                 detail={"target": target, **plan}, by=author,
+            )
+            log.info(
+                "rollback_completed",
+                skill_slug=slug, target=target[:12],
+                commit=commit[:12],
+                replaced_count=len(plan["changed"]) + len(plan["restored"]),
             )
             return {"ok": True, "commit": commit, "target": target, **plan}
 
@@ -849,14 +1108,33 @@ class LocalEngine:
         - dry_run 与真跑共用 `_pull_diff` 同一判据（FR-1.3.7 / 07 N17）。
         - 冲突不提供 on_conflict / force，交 Web 人工路径。
         """
+        log.info(
+            "sync_pull_started",
+            skill_slug=slug, runtime_key=runtime_key, dry_run=dry_run,
+        )
         row = self.db.get_skill_by_slug(slug)
         if row is None:
+            log.warning(
+                "sync_pull_failed",
+                skill_slug=slug, error_code="INVALID_INPUT",
+                reason="未纳管",
+            )
             raise ValueError(f"未纳管的 skill: {slug}")
         adapters = {a.key: a for a in all_adapters()}
         if runtime_key not in adapters:
+            log.warning(
+                "sync_pull_failed",
+                skill_slug=slug, runtime_key=runtime_key,
+                error_code="INVALID_INPUT", reason="未知 runtime",
+            )
             raise ValueError(f"未知 runtime: {runtime_key}")
         binding = self.db.get_binding(row.id, runtime_key)
         if binding is None or binding.installed_commit is None:
+            log.warning(
+                "sync_pull_failed",
+                skill_slug=slug, runtime_key=runtime_key,
+                error_code="INVALID_INPUT", reason="无纳管基线",
+            )
             raise ValueError(f"{slug} 在 {runtime_key} 无纳管基线，无改动可回收")
         deploy = adapters[runtime_key].resolve_root("user", home=self.home) / slug
 
@@ -878,6 +1156,11 @@ class LocalEngine:
         base_map = {f.path: f.content for f in base_snap.files if f.in_git}
         head_map = {f.path: f.content for f in head_snap.files if f.in_git}
         if head_map != base_map:
+            log.warning(
+                "conflict_detected",
+                op="sync_pull", skill_slug=slug, runtime_key=runtime_key,
+                reason="canonical 在基线之后已有新提交（双向分歧）",
+            )
             return {
                 "ok": False, "error_code": "CONFLICT",
                 "detail": "canonical 在基线之后已有新提交（双向分歧），回收需人工在 Web 处理",
@@ -885,6 +1168,10 @@ class LocalEngine:
 
         _disk, changed, added, removed = _pull_diff()
         if not (changed or added or removed):
+            log.info(
+                "sync_pull_completed",
+                skill_slug=slug, runtime_key=runtime_key, noop=True,
+            )
             return {"ok": True, "noop": True, "changed": [], "added": [], "removed": []}
         preview = {
             "ok": True, "dry_run": True,
@@ -892,9 +1179,14 @@ class LocalEngine:
             "removed": removed,
         }
         if dry_run:
+            log.info(
+                "dry_run_executed",
+                op="sync_pull", skill_slug=slug, runtime_key=runtime_key,
+                changed_count=len(changed),
+            )
             return preview
 
-        with write_lock(self.paths.lock_dir):
+        with write_lock(self.paths.lock_dir, operation="pull_skill"):
             # 锁内重算（FR-1.3.7：判据与预览完全一致）
             disk, changed, added, removed = _pull_diff()
             if not (changed or added or removed):
@@ -908,6 +1200,11 @@ class LocalEngine:
                 safe_path(skill_dir, rel).unlink(missing_ok=True)
             commit = self.git.commit(
                 [f"skills/{slug}"], f"pull: 回收 {runtime_key} 磁盘改动为 canonical 新版本",
+            )
+            log.info(
+                "git_commit_created",
+                skill_slug=slug, commit=commit[:12],
+                message=f"pull from {runtime_key}",
             )
             binding.status = "synced"
             binding.installed_commit = commit
@@ -923,6 +1220,12 @@ class LocalEngine:
                 detail={"changed": sorted(changed), "added": sorted(added),
                         "removed": removed},
                 by="mcp",
+            )
+            log.info(
+                "sync_pull_completed",
+                skill_slug=slug, runtime_key=runtime_key,
+                commit=commit[:12],
+                replaced_count=len(changed) + len(added),
             )
             return {
                 "ok": True, "commit": commit,
@@ -1241,6 +1544,87 @@ class LocalEngine:
             "slug": slug,
             "staleness_days": staleness_days,
             "dependency_broken": broken,
+        }
+
+    # ---- Settings 区块（FR-2.4.10 / T26）----
+    # 三个方法对应三个 WS_TASK_OPS：runtimes_list / runtime_diagnose / protocol_status。
+    # 写操作（创建/编辑/删除 custom Runtime）走云端 cloud_repo，daemon 不参与。
+
+    def list_potential_runtimes(self) -> dict:
+        """白名单探测 + 4 builtin（FR-1.0.32 / T24）。仅 daemon 端扫磁盘。
+
+        返回 dict 含 candidates（白名单命中） + builtins（4 个内置 adapter），
+        云端 handler 会**合并** cloud Runtime 表里的 custom Runtime（custom 不在
+        daemon 端，需云端来 merge；discovered 端点 = daemon task + cloud 合并）。
+        """
+        from skillos.core.algorithm.discover import discover_potential_runtimes
+
+        home = self.home
+        candidates = [c.to_dict() for c in discover_potential_runtimes(home)]
+        builtins = [
+            {"key": a.key, "name": a.key, "version": a.version}
+            for a in all_adapters()
+        ]
+        return {
+            "scanned_at": datetime.now(UTC).isoformat(),
+            "home": str(home),
+            "candidates": candidates,
+            "builtins": builtins,
+        }
+
+    def diagnose_custom_path(self, root_path: str) -> dict:
+        """custom Runtime 路径诊断（FR-1.0.33 / D9）。
+
+        只读校验：存在性 + 至少一个 SKILL.md。
+        与 discover.py 的命中判据**同语义但不共用**——诊断端要透传错误给前端
+        （"找不到/无权限"），扫描端可吞错（0 命中 = 该路径无可纳管 SKILL.md）。
+        T16 单一入口的精神是"枚举行为一致"，诊断 + 枚举是不同语义层（07 注释）。
+        """
+        info: dict = {"path": root_path, "exists": False, "skill_count": 0,
+                      "error": None, "evidence": "local-observed"}
+        if not root_path:
+            info["error"] = "path is empty"
+            return info
+        p = Path(root_path)
+        info["exists"] = p.exists()
+        if not info["exists"]:
+            return info
+        try:
+            count = 0
+            for child in p.iterdir():
+                if child.is_dir() and (child / "SKILL.md").is_file():
+                    count += 1
+            info["skill_count"] = count
+        except (OSError, PermissionError) as e:
+            info["error"] = f"{type(e).__name__}: {e}"
+        return info
+
+    def protocol_status(self) -> dict:
+        """协议状态（FR-1.0.29 / T18）：sticky + HEAD trailer + 一致性。
+
+        云端 handler 经 'protocol_status' task 调用；本地 home 是 self.home 下的 repo_root。
+        """
+        from skillos.core.fs.protocol import (
+            CURRENT_PROTOCOL, check, parse_trailer, read_sticky,
+        )
+        head_message: str | None = None
+        try:
+            log = self.git.log(limit=1)
+            if log:
+                head_message = log[0].message
+        except Exception:  # noqa: BLE001 —— 仓库未初始化 / git 不可用
+            head_message = None
+        sticky = read_sticky(self.paths.repo_root)
+        trailer = parse_trailer(head_message) if head_message else None
+        chk = check(head_message, sticky)
+        return {
+            "current_supported": CURRENT_PROTOCOL,
+            "sticky_version": sticky,
+            "trailer_version": trailer,
+            "head_message_first_line": (head_message or "").splitlines()[0] if head_message else None,
+            "ok": chk.ok,
+            "read_only": chk.read_only,
+            "reason": chk.reason,
         }
 
 

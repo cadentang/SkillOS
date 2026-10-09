@@ -204,6 +204,10 @@ class Runtime(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     owner_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
+    # FR-1.0.32 / T25 / T26: discover_only = true 时该 Runtime 只在 Settings 诊断区出现，
+    # 不进漂移矩阵列头 / 不参与 push 目标 / 不参与 binding 匹配 / 不参与 compare_normalized
+    # 显式状态机：单一信号，"路径填了但忘了改标志"被默认行为吞掉是禁止的
+    discover_only: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
 
 class RuntimeBinding(Base):

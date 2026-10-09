@@ -28,9 +28,18 @@ dry_run 与真跑共用同一判据（FR-1.3.7）：预览返回的 held_back / 
 
 调用约定：必须在 services 层 write_lock 内调用（FR-1.0.17）；backups_dir 由调用方
 显式传入（T1），建议落仓库 .skillos/backups/（.gitignore 排除提交）。
+
+关键事件（T23 / 04 §6.2.6）：
+- write_policy_rejected：policy 不允许覆盖（policy 不达标 / 目标非我方内容）
+- removals_held_back：会删内容的写入需确认（无人值守路径报 held_back_removals）
 """
 
 from __future__ import annotations
+
+from skillos.core.logging import get_logger
+
+log = get_logger("skillos.services.sync")
+
 
 import os
 import shutil
@@ -188,6 +197,13 @@ def _precheck(
 
     if disk_exists and entries:
         if not _policy_allows(policy, req.facts, disk_managed):
+            log.warning(
+                "write_policy_rejected",
+                error_code="TARGET_CONFLICT",
+                runtime_key=req.adapter.key, skill_slug=snapshot.slug,
+                policy=policy.value,
+                detail="policy 判定失败：无法证明目标属于我方",
+            )
             plan.action, plan.error_code = "conflict", "TARGET_CONFLICT"
             plan.detail = "无法证明目标属于我方（policy 判定失败），逐字节保留"
             return plan
@@ -196,6 +212,13 @@ def _precheck(
         plan.removals = _collapse_removals(removed)
         if plan.removals and confirmed != frozenset(plan.removals):
             # NFR-11.5：确认必须绑定精确路径集合；无人值守路径调用方根本不会到这一步
+            log.warning(
+                "write_policy_rejected",
+                error_code="REMOVALS_REQUIRE_CONFIRM",
+                runtime_key=req.adapter.key, skill_slug=snapshot.slug,
+                policy=policy.value,
+                held_back_count=len(plan.removals),
+            )
             plan.action, plan.error_code = "held_back", "REMOVALS_REQUIRE_CONFIRM"
             return plan
     return plan

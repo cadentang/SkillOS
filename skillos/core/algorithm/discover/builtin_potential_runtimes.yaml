@@ -1,0 +1,56 @@
+# Runtime 约定俗成位置白名单（T24 / FR-1.0.32）
+# ================ 新增 / 删除探测项只动本文件，core/algorithm/discover.py 零修改 ================
+#
+# 字段：
+#   key            唯一标识（与 builtin adapter 同名 → 不在候选列表里出现，按"已纳管"显示）
+#   home_relpath   相对 home 的探测路径，支持 {home} 占位
+#   display_name   UI 展示名
+#   verified_at    本机实测确认日期（YYYY-MM-DD）；null = 未验证，UI 出警告
+#   evidence       "official-doc" | "upstream-source" | "local-observed"
+#   skip           true = 整条跳过（保留项但当前不探测；用于临时关停某个白名单项）
+#
+# 注意：本文件**禁止出现 `~/.cursor` / `~/.cline` 等字面量**（T24 验证：grep
+# `core/algorithm/discover.py` 与本文件路径前缀应为零命中），探测命中判据
+# 仅 = 路径下存在至少一个 SKILL.md（沿用 list_content_files 单一入口，T16）。
+
+- key: cursor
+  home_relpath: "{home}/.cursor/skills"
+  display_name: Cursor
+  verified_at: null
+  evidence: upstream-source
+
+- key: windsurf
+  home_relpath: "{home}/.windsurf/skills"
+  display_name: Windsurf
+  verified_at: null
+  evidence: upstream-source
+
+- key: cline
+  home_relpath: "{home}/.cline/skills"
+  display_name: Cline
+  verified_at: null
+  evidence: upstream-source
+
+- key: continue
+  home_relpath: "{home}/.continue/skills"
+  display_name: Continue
+  verified_at: null
+  evidence: upstream-source
+
+- key: roo
+  home_relpath: "{home}/.roo/skills"
+  display_name: Roo Code
+  verified_at: null
+  evidence: upstream-source
+
+- key: aider
+  home_relpath: "{home}/.aider/skills"
+  display_name: Aider
+  verified_at: null
+  evidence: upstream-source
+
+- key: trae
+  home_relpath: "{home}/.trae/skills"
+  display_name: Trae
+  verified_at: null
+  evidence: upstream-source

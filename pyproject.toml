@@ -31,6 +31,8 @@ dependencies = [
     "httpx>=0.27",
     # 云端认证（T4：JWT）
     "pyjwt>=2.8",
+    # 结构化日志（T23：structlog + stdlib 桥接；`04 §6.2`）
+    "structlog>=24.1",
 ]
 
 [project.optional-dependencies]

@@ -12,18 +12,22 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import os
 import secrets
+import time
+import uuid
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from skillos.api.routes import (
     auth,
     checks,
     conflicts,
+    daemon,
     files,
+    logs,
     runtimes,
     skills,
     sync,
@@ -35,10 +39,18 @@ from skillos.api.routes import sandbox as sandbox_routes
 from skillos.api.security import hash_token, new_agent_token
 from skillos.api.web import mount_web
 from skillos.api.ws_hub import AgentConn, WsHub
+from skillos.core.logging import (
+    bind_op_id,
+    get_logger,
+    get_op_id,
+    new_op_id,
+    reset_op_context,
+    setup_logging,
+)
 from skillos.store.cloud_repo import CloudRepo
 from skillos.store.db import init_schema, make_engine, make_session_factory
 
-log = logging.getLogger("skillos.api")
+log = get_logger("skillos.api")
 
 
 def create_app(db_url: str | None = None, jwt_secret: str | None = None,
@@ -48,13 +60,20 @@ def create_app(db_url: str | None = None, jwt_secret: str | None = None,
     sandbox：沙盒模式标志（SKILLOS_SANDBOX=1），None = 按环境判定。
     沙盒模式下 health 暴露该标志（前端演示横幅）并挂载 reset 路由（FR-3.10）。
     """
+    # 容器部署日志：JSON 到 stdout（Docker 收集），不落 ~/.skillos/logs
+    # （04 §6.2.4 Sink 表：云端 api 行）
+    setup_logging("api")
+
     db_url = db_url or os.environ.get(
         "SKILLOS_DB_URL", "sqlite:///./skillos-cloud.db"
     )
     jwt_secret = jwt_secret or os.environ.get("SKILLOS_JWT_SECRET")
     if jwt_secret is None:
         jwt_secret = secrets.token_urlsafe(32)
-        log.warning("SKILLOS_JWT_SECRET 未设置，使用进程随机值（重启后 token 全失效）")
+        log.warning(
+            "jwt_secret_missing",
+            detail="使用进程随机值，重启后所有 token 失效",
+        )
     if sandbox is None:
         sandbox = os.environ.get("SKILLOS_SANDBOX") == "1"
 
@@ -69,6 +88,55 @@ def create_app(db_url: str | None = None, jwt_secret: str | None = None,
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # op_id middleware（FR-1.1.11 / T23）：每个 HTTP 请求绑定 op_id
+    # 用于 cross-request 排错；响应头 `X-Request-Id` 回写便于客户端捕获
+    @app.middleware("http")
+    async def _op_id_middleware(request: Request, call_next):
+        # 读 header 缺失则生成；保证前后端对齐
+        op_id = request.headers.get("X-Request-Id") or new_op_id()
+        bind_op_id(component="http", op_id=op_id,
+                   method=request.method, path=request.url.path)
+        t0 = time.monotonic()
+        try:
+            response = await call_next(request)
+            duration_ms = int((time.monotonic() - t0) * 1000)
+            log.info(
+                "http_request_completed",
+                http_method=request.method, http_path=request.url.path,
+                http_status=response.status_code,
+                duration_ms=duration_ms,
+            )
+            response.headers["X-Request-Id"] = op_id
+            return response
+        except Exception:
+            duration_ms = int((time.monotonic() - t0) * 1000)
+            log.exception(
+                "http_request_failed",
+                http_method=request.method, http_path=request.url.path,
+                duration_ms=duration_ms,
+            )
+            raise
+        finally:
+            reset_op_context()
+
+    @app.exception_handler(Exception)
+    async def _unhandled_exception_handler(request: Request, exc: Exception):
+        """统一 ERROR 记录 + 错误信封（04 §6.1）。"""
+        op_id = get_op_id() or new_op_id()
+        log.exception(
+            "unhandled_exception",
+            http_method=request.method, http_path=request.url.path,
+            error_type=type(exc).__name__,
+        )
+        return JSONResponse(
+            status_code=500,
+            content={
+                "ok": False, "data": None,
+                "error": {"code": "INTERNAL", "message": "服务内部错误"},
+            },
+            headers={"X-Request-Id": op_id},
+        )
 
     engine = make_engine(db_url)
     init_schema(engine)
@@ -87,7 +155,9 @@ def create_app(db_url: str | None = None, jwt_secret: str | None = None,
         conflicts.router,
         upstream.router,
         runtimes.router,
+        daemon.router,  # FR-2.4.10 Settings "守护状态" 区块
         teams.router,
+        logs.router,  # FR-1.1.12：daemon 日志查看代理
     )
     if sandbox:
         # 仅沙盒部署存在 reset 入口（04 §2.7.7）；云端不碰磁盘，恢复在 daemon 侧
@@ -107,15 +177,25 @@ def create_app(db_url: str | None = None, jwt_secret: str | None = None,
         发 paired 消息回 daemon → 注册连接。
         """
         await ws.accept()
+        # daemon WS 连接级 op_id（与上层连接 / 任务绑定）
+        bind_op_id(component="ws_agent")
         hello: dict = {}
         try:
             hello = await _recv_json(ws, timeout=15.0)
         except TimeoutError:
+            log.warning(
+                "ws_hello_timeout",
+            )
             await ws.close(code=4000, reason="hello timeout")
             return
         if not isinstance(hello, dict) or hello.get("type") != "hello":
+            log.warning(
+                "ws_hello_invalid",
+            )
             await ws.close(code=4000, reason="expected hello")
             return
+        # hello 到达后补绑 agent_id（下一轮 bind 合并上下文）
+        bind_op_id(component="ws_agent", agent_id=str(hello.get("agent_id") or ""))
 
         agent_id = str(hello.get("agent_id") or "")
         token = str(hello.get("token") or "")
@@ -133,6 +213,11 @@ def create_app(db_url: str | None = None, jwt_secret: str | None = None,
             if token:
                 tok = repo.find_token_by_hash(hash_token(token))
                 if tok is None:
+                    log.warning(
+                        "auth_failed",
+                        reason="token 无效或已撤销",
+                        agent_id=agent_id,
+                    )
                     await _deny(ws, "AUTH_FAILED", "token 无效或已撤销")
                     return
                 repo.touch_token(tok.id)
@@ -140,12 +225,28 @@ def create_app(db_url: str | None = None, jwt_secret: str | None = None,
                                  user_id=tok.user_id, token_id=tok.id)
                 # 回带 user_id：daemon 上报漂移事件需要归属（云端不猜）
                 await ws.send_json({"type": "welcome", "user_id": tok.user_id})
+                log.info(
+                    "ws_agent_connected",
+                    agent_id=conn.agent_id,
+                    user_id=conn.user_id,
+                    auth_mode="token",
+                )
             elif pair_code:
                 ip = ws.client.host if ws.client else "unknown"
                 ip_scope = f"ip:{ip}"
+                log.info(
+                    "pair_started",
+                    ip=ip,
+                    agent_id=agent_id,
+                )
                 # ① ip 维度锁定检查先行（枚举者未必登录，04 §5.1 / FR-3.15）
                 allowed, retry = repo.check_scope(ip_scope)
                 if not allowed:
+                    log.warning(
+                        "rate_limited",
+                        scope="ip", retry_s=retry,
+                        agent_id=agent_id,
+                    )
                     await _deny(ws, "RATE_LIMITED", f"配对尝试过多，{retry}s 后重试")
                     return
                 # ② peek 码归属（不消费）→ user 维度锁定检查
@@ -153,6 +254,11 @@ def create_app(db_url: str | None = None, jwt_secret: str | None = None,
                 if pc is not None:
                     ok_u, retry_u = repo.check_scope(f"user:{pc.user_id}")
                     if not ok_u:
+                        log.warning(
+                            "rate_limited",
+                            scope="user", retry_s=retry_u,
+                            agent_id=agent_id,
+                        )
                         await _deny(ws, "RATE_LIMITED", f"配对尝试过多，{retry_u}s 后重试")
                         return
                 # ③ 校验消费码；失败双维度计数（码存在但已用/过期时归属可查）
@@ -162,6 +268,11 @@ def create_app(db_url: str | None = None, jwt_secret: str | None = None,
                     if fail_user:
                         repo.record_scope_failure(f"user:{fail_user}")
                     repo.record_scope_failure(ip_scope)
+                    log.warning(
+                        "pair_failed",
+                        reason="码无效或已使用",
+                        agent_id=agent_id,
+                    )
                     await _deny(ws, "PAIRING_FAILED", "配对码无效或已使用")
                     return
                 token_id, plain, token_hash = new_agent_token()
@@ -174,7 +285,17 @@ def create_app(db_url: str | None = None, jwt_secret: str | None = None,
                                     "user_id": consumed.user_id})
                 conn = AgentConn(ws=ws, agent_id=agent_id,
                                  user_id=consumed.user_id, token_id=token_id)
+                log.info(
+                    "pair_succeeded",
+                    user_id=consumed.user_id,
+                    agent_id=agent_id,
+                )
             else:
+                log.warning(
+                    "auth_failed",
+                    reason="缺少 token 或 pair_code",
+                    agent_id=agent_id,
+                )
                 await _deny(ws, "AUTH_FAILED", "缺少 token 或 pair_code")
                 return
 
@@ -210,7 +331,9 @@ def create_app(db_url: str | None = None, jwt_secret: str | None = None,
         except WebSocketDisconnect:
             pass  # finally 已收尾
         except Exception:  # noqa: BLE001 —— WS 循环内任何异常都不能带崩整个服务
-            log.exception("agent ws loop error")
+            log.exception(
+                "ws_agent_loop_error",
+            )
             try:
                 await ws.close(code=1011)
             except Exception:  # noqa: BLE001
@@ -218,7 +341,17 @@ def create_app(db_url: str | None = None, jwt_secret: str | None = None,
         finally:
             # 覆盖全部退出路径（deny / 异常 / 断连）确定性归还池连接。
             # close 幂等；detach 后 tok 的已加载属性仍可读（expire_on_commit=False）。
+            try:
+                if conn is not None:
+                    log.info(
+                        "ws_agent_disconnected",
+                        agent_id=conn.agent_id,
+                        user_id=conn.user_id,
+                    )
+            except Exception:  # noqa: BLE001
+                pass
             session.close()
+            reset_op_context()
 
     @app.websocket("/ws/ui")
     async def ws_ui(ws: WebSocket) -> None:

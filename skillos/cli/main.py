@@ -5,6 +5,10 @@
 - 退出码：0 成功 / 1 业务失败 / 2 参数错误 / 3 冲突待处理。
 - CLI 与 MCP 完全不走云端（FR-2.4.3 / NFR-1），离线可用。
 - 分层红线：本层只做参数解析与呈现，业务全部走 services.engine。
+
+日志（T23）：CLI 模式默认级别 WARNING —— 用户输出走 console.print，
+不归 logger；脚本串联时可设 `SKILLOS_LOG_LEVEL=INFO` 激活命令级 INFO 日志；
+每次命令执行一个 op_id；--json 输出带 `op_id` 字段（04 §6.2.4 Sink 表 1 行）。
 """
 
 from __future__ import annotations
@@ -17,11 +21,21 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from skillos.core.logging import (
+    bind_op_id,
+    get_logger,
+    setup_logging,
+)
+
 # 05 P0-2：中文 + Windows 控制台默认 cp936，输出中文 skill 名必抛 UnicodeEncodeError。
 # 入口处强制 UTF-8，必须先于任何输出执行。
 for _s in (sys.stdout, sys.stderr):
     if hasattr(_s, "reconfigure"):
         _s.reconfigure(encoding="utf-8", errors="replace")
+
+# CLI 模式日志初始化（必须先于任何 command 注册）
+setup_logging("cli")
+log = get_logger("skillos.cli")
 
 app = typer.Typer(
     name="skillos",
@@ -29,6 +43,23 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 console = Console()
+
+
+@app.callback()
+def _cli_callback(ctx: typer.Context) -> None:
+    """每个 CLI 命令入口：分配 op_id + 记 started（命令级事件）。
+
+    命令完成（completed / failed）由 services 层埋点承担（避免双重记录）。
+    CLI 模式默认级别 WARNING，本日志静默；`SKILLOS_LOG_LEVEL=INFO` 激活。
+    """
+    cmd = ctx.invoked_subcommand or "skillos"
+    op_id = bind_op_id(component="cli", command=cmd)
+    log.info(
+        "cli_command_started",
+        command=cmd, op_id=op_id,
+    )
+    # 把 op_id 挂到 ctx.obj 让业务代码可读（--json 输出时附上）
+    ctx.obj = {"op_id": op_id}
 
 # 退出码（04 §2.5.1）
 EXIT_OK = 0
@@ -429,7 +460,7 @@ def check(
 
 @app.command()
 def doctor() -> None:
-    """环境自检（FR-1.1.8）：10 项检查逐项返回 ok/warn/fail，见 04 §2.5.1 表。"""
+    """环境自检（FR-1.1.8）：11 项检查逐项返回 ok/warn/fail，见 04 §2.5.1 表。"""
     from skillos.cli.doctor import run_doctor
 
     failures = run_doctor(console)
@@ -467,6 +498,18 @@ def mcp() -> None:
     from skillos.mcp.server import main as mcp_main
 
     mcp_main()
+
+
+@app.command()
+def logs() -> None:
+    """查看 / 过滤本地日志（FR-1.1.12）。
+
+    与 `skillos log <slug>`（git log 不可变账本）职责分离：
+    本命令 = 运行流水；`log` 子命令 = 资产身份历史。
+    """
+    from skillos.cli.logs_cmd import logs_cmd
+
+    logs_cmd()
 
 
 if __name__ == "__main__":

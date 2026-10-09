@@ -32,6 +32,13 @@ WS_TASK_OPS: frozenset[str] = frozenset(
         # P7 沙盒重置（FR-3.10）：engine.sandbox_reset 三层检查之一
         # （engine.is_sandbox / 本分支 / API 404），非沙盒部署不可达
         "sandbox_reset",
+        # P5 日志查看（FR-1.1.12）：具名领域操作，不暴露任意文件读取
+        # （路径固定为 ~/.skillos/logs/<mode>.log，参数白名单化）
+        "logs",
+        # P3 Settings 页（FR-2.4.10 / T26）：Runtime 自动发现 / 路径诊断 / 协议状态
+        # 仅读；写操作（POST / PATCH / DELETE custom Runtime）走云端 cloud_repo，
+        # daemon 不参与（不暴露 "force"/"git" 类通用操作，OUT-14）
+        "runtimes_list", "runtime_diagnose", "protocol_status",
     }
 )
 
