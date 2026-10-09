@@ -277,11 +277,22 @@ class TaskExecutor:
             # P3 Settings 页（FR-2.4.10 / T26 / FR-1.0.32）：白名单探测 + 4 builtin
             return {"ok": True, "data": engine.list_potential_runtimes()}
         if op == "runtime_diagnose":
-            # FR-1.0.33：custom Runtime 路径诊断（只读，不动磁盘）
+            # FR-1.0.33：Runtime 路径诊断（只读，不动磁盘）。
+            # custom：云端查表传 root_path；builtin / 白名单候选：传 key，
+            # daemon 端按 adapter / yaml 约定路径解析（云端不知道用户 home）。
             try:
-                return {"ok": True, "data": engine.diagnose_custom_path(
-                    str(params.get("root_path") or "")
-                )}
+                root_path = str(params.get("root_path") or "")
+                key = str(params.get("key") or "")
+                if root_path:
+                    data = engine.diagnose_custom_path(root_path)
+                elif key:
+                    data = engine.diagnose_runtime_key(key)
+                else:
+                    return {"ok": False, "error": {
+                        "code": "INVALID_INPUT",
+                        "message": "runtime_diagnose 需要 root_path 或 key",
+                    }}
+                return {"ok": True, "data": data}
             except Exception as e:  # noqa: BLE001
                 return {"ok": False, "error": {"code": "IO", "message": str(e)}}
         if op == "protocol_status":

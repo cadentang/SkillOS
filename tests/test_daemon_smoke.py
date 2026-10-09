@@ -50,20 +50,21 @@ def engine_home(tmp_path: Path):
 class TestDaemonOpsSmoke:
     """P3 升级后 3 个新 op 走真 dispatch —— 防止 lazy import 漏抓."""
 
-    def test_runtimes_list_returns_7_candidates(self, engine_home):
-        """FR-2.4.10 / T24 / FR-1.0.32: 白名单 7 个, 与 yaml 一致.
+    def test_runtimes_list_returns_4_candidates(self, engine_home):
+        """FR-2.4.10 / T24 / FR-1.0.32: 白名单 4 个, 与 yaml 一致.
 
+        2026-10-09 产品决策: 移除 continue / roo / aider（候选噪音）.
         覆盖之前 ImportError（discover.py / discover/ 同名冲突）.
         """
         engine, _ = engine_home
         r = TaskExecutor(engine).execute("runtimes_list", {})
         assert r["ok"], r
         assert "candidates" in r["data"]
-        assert len(r["data"]["candidates"]) == 7
+        assert len(r["data"]["candidates"]) == 4
         keys = {c["key"] for c in r["data"]["candidates"]}
-        assert keys == {
-            "cursor", "windsurf", "cline", "continue", "roo", "aider", "trae",
-        }, f"yaml 漂移: actual={keys}"
+        assert keys == {"cursor", "windsurf", "cline", "trae"}, (
+            f"yaml 漂移: actual={keys}"
+        )
 
     def test_runtimes_list_has_builtins(self, engine_home):
         """FR-1.0.32: builtins 至少 4 个内置 adapter."""
@@ -88,12 +89,15 @@ class TestDaemonOpsSmoke:
         assert r["data"]["error"] is None
 
     def test_runtime_diagnose_empty_path(self, engine_home):
-        """FR-1.0.33: 空路径 → 结构化 error 字段, 不抛异常."""
+        """FR-1.0.33 / 07 N12: 空 root_path 且无 key → 结构化 INVALID_INPUT.
+
+        行为变化（key 支持后）：空参从 data.error="path is empty" 收紧为
+        INVALID_INPUT —— 空参是调用方错误，严格拒绝优于软兜底.
+        """
         engine, _ = engine_home
         r = TaskExecutor(engine).execute("runtime_diagnose", {"root_path": ""})
-        assert r["ok"], r
-        assert r["data"]["error"] == "path is empty"
-        assert r["data"]["exists"] is False
+        assert not r["ok"]
+        assert r["error"]["code"] == "INVALID_INPUT"
 
     def test_protocol_status_returns_dict(self, engine_home):
         """FR-1.0.29 / T18: protocol_status 返回 dict 含 5 关键字段.
@@ -110,6 +114,34 @@ class TestDaemonOpsSmoke:
             assert key in data, f"缺失字段: {key}"
         assert isinstance(data["ok"], bool)
         assert isinstance(data["read_only"], bool)
+
+    def test_runtime_diagnose_by_key_builtin(self, engine_home):
+        """FR-1.0.33 / FR-2.4.10: builtin key 诊断走 adapter 约定路径（T12）.
+
+        诊断 claude → resolve_root(user scope) 指向的路径存在性（engine_home
+        fixture 已建 ~/.claude/skills/demo）.
+        """
+        engine, _ = engine_home
+        r = TaskExecutor(engine).execute("runtime_diagnose", {"key": "claude"})
+        assert r["ok"], r
+        assert r["data"]["path"], "builtin 诊断必须解析出约定路径"
+        assert r["data"]["exists"] is True
+        assert r["data"]["skill_count"] >= 1  # fixture 建了 demo
+
+    def test_runtime_diagnose_by_key_unknown(self, engine_home):
+        """FR-1.0.26 ④: 未知 key 必须结构化报错, 不猜路径."""
+        engine, _ = engine_home
+        r = TaskExecutor(engine).execute("runtime_diagnose", {"key": "no-such"})
+        assert r["ok"], r
+        assert r["data"]["exists"] is False
+        assert "未知 runtime key" in (r["data"]["error"] or "")
+
+    def test_runtime_diagnose_needs_key_or_path(self, engine_home):
+        """空参必须结构化 INVALID_INPUT, 不静默成功."""
+        engine, _ = engine_home
+        r = TaskExecutor(engine).execute("runtime_diagnose", {})
+        assert not r["ok"]
+        assert r["error"]["code"] == "INVALID_INPUT"
 
     def test_unknown_op_still_rejected(self, engine_home):
         """07 N12 回归守卫: 未知 op 必须结构化 INVALID_INPUT, 不静默成功.

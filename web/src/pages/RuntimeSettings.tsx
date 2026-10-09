@@ -48,6 +48,7 @@ export default function RuntimeSettings() {
 function RuntimeBlock() {
   const queryClient = useQueryClient();
   const [diagInfo, setDiagInfo] = useState<{ key: string; data: any } | null>(null);
+  const [addOpen, setAddOpen] = useState(false);
 
   const discovered = useQuery<DiscoveredResponse>({
     queryKey: ["runtimes", "discovered"],
@@ -96,6 +97,13 @@ function RuntimeBlock() {
   });
 
   function joinRuntime(c: DiscoveredRuntime) {
+    if (c.custom) {
+      // discover_only custom 转正（T25：显式 discover_only=false，用户点按钮即显式确认）
+      if (!window.confirm(`将「${c.name}」加入已纳管？`)) return;
+      updateMut.mutate({ key: c.key, root_path: c.path, discover_only: false });
+      return;
+    }
+    // 白名单候选 → 创建 custom 条目（key=custom:<slug>，后端 slug 去重防两段重复）
     const displayName = window.prompt(
       `加入 Runtime 候选：${c.name}（${c.path}）\n\n请输入显示名（可空）`,
       c.name,
@@ -116,6 +124,12 @@ function RuntimeBlock() {
   }
 
   function editCustom(rt: DiscoveredRuntime) {
+    if (!rt.custom) {
+      window.alert(
+        `「${rt.name}」是内置 Runtime：路径由 adapter 约定（T12 路径即数据），不可编辑。`,
+      );
+      return;
+    }
     const newPath = window.prompt(`编辑 custom 路径：${rt.name}`, rt.path);
     if (!newPath) return;
     updateMut.mutate({
@@ -126,6 +140,12 @@ function RuntimeBlock() {
   }
 
   function deleteCustom(rt: DiscoveredRuntime) {
+    if (!rt.custom) {
+      window.alert(
+        `「${rt.name}」是内置 Runtime，不可删除。\n\n如不想使用，分发时不勾选该目标即可。`,
+      );
+      return;
+    }
     if (
       !window.confirm(
         `确认删除 custom Runtime：${rt.name}（${rt.key}）？\n\n此操作会清理其所有 binding，且不可恢复。`,
@@ -136,56 +156,73 @@ function RuntimeBlock() {
   }
 
   const data = discovered.data;
-  const managed: DiscoveredRuntime[] = data?.managed ?? [];
-  const candidates: DiscoveredRuntime[] = data?.candidates ?? [];
-  const customList = managed.filter((r) => r.custom);
+  // 按 managed 字段切两段（不按数组切）：discover_only custom（手动添加待加入）
+  // 与白名单候选都归"未纳管"段（FR-1.0.34 / T25 显式状态机）
+  const all: DiscoveredRuntime[] = [
+    ...(data?.managed ?? []),
+    ...(data?.candidates ?? []),
+  ];
+  const managedList = all.filter((r) => r.managed);
+  const unmanagedList = all.filter((r) => !r.managed);
+  const customCount = managedList.filter((r) => r.custom).length;
 
   return (
     <Section
       title="Runtime"
       subtitle={
         data
-          ? `已纳管 ${managed.length} 个（builtin ${managed.filter((r) => !r.custom).length} + custom ${customList.length}） · 候选 ${candidates.length} 个`
+          ? `已纳管 ${managedList.length} 个（builtin ${managedList.length - customCount} + custom ${customCount}） · 未纳管 ${unmanagedList.length} 个`
           : "扫描中…"
       }
       actions={
-        <button
-          type="button"
-          onClick={() => {
-            void discovered.refetch();
-          }}
-          className="rounded-[var(--radius-control)] px-sm py-xs text-[var(--font-caption)]"
-          style={{ background: "var(--surface-alt)", color: "var(--text-primary)" }}
-        >
-          重新扫描
-        </button>
+        <>
+          <Btn label="添加 Runtime" onClick={() => setAddOpen(true)} />
+          <button
+            type="button"
+            onClick={() => {
+              void discovered.refetch();
+            }}
+            className="rounded-[var(--radius-control)] px-sm py-xs text-[var(--font-caption)]"
+            style={{ background: "var(--surface-alt)", color: "var(--text-primary)" }}
+          >
+            重新扫描
+          </button>
+        </>
       }
     >
       {discovered.isError && (
         <ErrorBanner error={discovered.error} />
       )}
 
-      <SubGroup title={`未纳管 Runtime 候选 (${candidates.length})`}>
-        {candidates.length === 0 ? (
-          <Empty>暂无候选（白名单命中 0 条）</Empty>
+      <SubGroup title={`未纳管 Runtime (${unmanagedList.length})`}>
+        {unmanagedList.length === 0 ? (
+          <Empty>暂无（白名单命中 0 条，无待加入的自定义 Runtime）</Empty>
         ) : (
-          candidates.map((c) => (
+          unmanagedList.map((c) => (
             <Row
               key={c.key}
               name={c.name}
               path={c.path}
               hint={
-                c.path_exists
-                  ? `路径命中 · ${c.skill_count ?? 0} 个 skill`
-                  : "路径未命中"
+                c.custom
+                  ? "自定义 · 待加入（discover_only）"
+                  : c.path_exists
+                    ? `路径命中 · ${c.skill_count ?? 0} 个 skill`
+                    : "路径未命中"
               }
-              hintColor={c.path_exists ? "ok" : "warn"}
+              hintColor={
+                c.custom
+                  ? "warn"
+                  : c.path_exists
+                    ? "ok"
+                    : "warn"
+              }
               actions={
                 <>
                   <Btn
                     label="加入"
                     onClick={() => joinRuntime(c)}
-                    disabled={createMut.isPending}
+                    disabled={createMut.isPending || updateMut.isPending}
                   />
                 </>
               }
@@ -194,23 +231,21 @@ function RuntimeBlock() {
         )}
       </SubGroup>
 
-      <SubGroup title={`已纳管 Runtime (${managed.length})`}>
-        {managed.length === 0 ? (
+      <SubGroup title={`已纳管 Runtime (${managedList.length})`}>
+        {managedList.length === 0 ? (
           <Empty>无</Empty>
         ) : (
-          managed.map((rt) => (
+          managedList.map((rt) => (
             <Row
               key={rt.key}
               name={rt.name}
               path={rt.path}
               hint={
                 rt.custom
-                  ? rt.discover_only
-                    ? "custom · discover_only"
-                    : "custom · 已纳管"
+                  ? "custom · 已纳管"
                   : `builtin · v${rt.version ?? "?"}`
               }
-              hintColor={rt.custom && rt.discover_only ? "warn" : "ok"}
+              hintColor="ok"
               actions={
                 <>
                   <Btn
@@ -218,27 +253,47 @@ function RuntimeBlock() {
                     onClick={() => diagnoseMut.mutate(rt.key)}
                     disabled={diagnoseMut.isPending}
                   />
-                  {rt.custom && (
-                    <>
-                      <Btn
-                        label="编辑"
-                        onClick={() => editCustom(rt)}
-                        disabled={updateMut.isPending}
-                      />
-                      <Btn
-                        label="删除"
-                        onClick={() => deleteCustom(rt)}
-                        danger
-                        disabled={deleteMut.isPending}
-                      />
-                    </>
-                  )}
+                  <Btn
+                    label="编辑"
+                    onClick={() => editCustom(rt)}
+                    disabled={updateMut.isPending}
+                  />
+                  <Btn
+                    label="删除"
+                    onClick={() => deleteCustom(rt)}
+                    danger
+                    disabled={deleteMut.isPending}
+                  />
                 </>
               }
             />
           ))
         )}
       </SubGroup>
+
+      {addOpen && (
+        <AddRuntimeDialog
+          pending={createMut.isPending}
+          error={createMut.error ?? null}
+          onClose={() => setAddOpen(false)}
+          onSubmit={(name, rootPath) => {
+            const slug = name
+              .toLowerCase()
+              .replace(/[^a-z0-9\u4e00-\u9fa5-]/g, "-")
+              .replace(/^-+|-+$/g, "");
+            createMut.mutate(
+              {
+                key: `custom:${slug || "runtime"}`,
+                name,
+                root_path: rootPath,
+                // FR-1.0.34 / T25：手动添加先进未纳管，点"加入"才转正
+                discover_only: true,
+              },
+              { onSuccess: () => setAddOpen(false) },
+            );
+          }}
+        />
+      )}
 
       {diagInfo && (
         <DiagPanel
@@ -249,6 +304,97 @@ function RuntimeBlock() {
         />
       )}
     </Section>
+  );
+}
+
+function AddRuntimeDialog({
+  pending,
+  error,
+  onClose,
+  onSubmit,
+}: {
+  pending: boolean;
+  error: unknown;
+  onClose: () => void;
+  onSubmit: (name: string, rootPath: string) => void;
+}) {
+  const [name, setName] = useState("");
+  const [rootPath, setRootPath] = useState("");
+  const canSubmit = name.trim().length > 0 && rootPath.trim().length > 0 && !pending;
+  return (
+    <Modal title="添加 Runtime" onClose={onClose}>
+      <div className="flex flex-col gap-sm">
+        <p
+          className="text-[var(--font-caption)]"
+          style={{ color: "var(--text-secondary)" }}
+        >
+          添加后进入「未纳管」列表；点「加入」后正式纳管并参与分发。
+        </p>
+        <label className="flex flex-col gap-xs">
+          <span className="text-[var(--font-caption)]">显示名</span>
+          <input
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="如 My Agent Skills"
+            autoFocus
+          />
+        </label>
+        <label className="flex flex-col gap-xs">
+          <span className="text-[var(--font-caption)]">skill 根目录（绝对路径）</span>
+          <input
+            value={rootPath}
+            onChange={(e) => setRootPath(e.target.value)}
+            placeholder="如 D:\\my-agent-skills 或 ~/.myagent/skills"
+            className="font-mono"
+          />
+        </label>
+        {error != null && <ErrorBanner error={error} />}
+        <div className="flex justify-end gap-xs">
+          <Btn label="取消" onClick={onClose} disabled={pending} />
+          <Btn label={pending ? "添加中…" : "添加"} onClick={() => onSubmit(name.trim(), rootPath.trim())} disabled={!canSubmit} />
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+function Modal({
+  title,
+  onClose,
+  children,
+}: {
+  title: string;
+  onClose: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-md"
+      style={{ background: "rgba(0,0,0,0.45)" }}
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-md rounded-[var(--radius-card)] border p-md shadow-lg"
+        style={{
+          background: "var(--surface)",
+          borderColor: "var(--border)",
+        }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="mb-sm flex items-center justify-between">
+          <span className="font-medium">{title}</span>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-[var(--radius-control)] px-sm py-xs"
+            style={{ color: "var(--text-secondary)" }}
+          >
+            ✕
+          </button>
+        </div>
+        {children}
+      </div>
+    </div>
   );
 }
 

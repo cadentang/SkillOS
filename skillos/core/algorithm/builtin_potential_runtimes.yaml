@@ -12,6 +12,9 @@
 # 注意：本文件**禁止出现 `~/.cursor` / `~/.cline` 等字面量**（T24 验证：grep
 # `core/algorithm/discover.py` 与本文件路径前缀应为零命中），探测命中判据
 # 仅 = 路径下存在至少一个 SKILL.md（沿用 list_content_files 单一入口，T16）。
+#
+# 2026-10-09：按产品决策移除 continue / roo / aider 三项（候选噪音过多，
+# 用户从未使用）。移除 = 删条目（T24 数据驱动，无代码改动）。
 
 - key: cursor
   home_relpath: "{home}/.cursor/skills"
@@ -28,24 +31,6 @@
 - key: cline
   home_relpath: "{home}/.cline/skills"
   display_name: Cline
-  verified_at: null
-  evidence: upstream-source
-
-- key: continue
-  home_relpath: "{home}/.continue/skills"
-  display_name: Continue
-  verified_at: null
-  evidence: upstream-source
-
-- key: roo
-  home_relpath: "{home}/.roo/skills"
-  display_name: Roo Code
-  verified_at: null
-  evidence: upstream-source
-
-- key: aider
-  home_relpath: "{home}/.aider/skills"
-  display_name: Aider
   verified_at: null
   evidence: upstream-source
 

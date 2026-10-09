@@ -1599,6 +1599,31 @@ class LocalEngine:
             info["error"] = f"{type(e).__name__}: {e}"
         return info
 
+    def diagnose_runtime_key(self, key: str) -> dict:
+        """按 key 诊断（FR-1.0.33 / D9 / FR-2.4.10 已纳管 builtin 行诊断）。
+
+        builtin adapter → resolve_root（deploy → fallback 顺序，04 §2.1.2）；
+        白名单候选 → yaml 路径。与 diagnose_custom_path 同语义（只读，错误
+        透传给前端，不吞）。
+        """
+        if not key:
+            return {"path": "", "exists": False, "skill_count": 0,
+                    "error": "key is empty", "evidence": "local-observed"}
+        # builtin：adapter 约定路径（T12 路径即数据，不猜）
+        for a in all_adapters():
+            if a.key == key:
+                root = a.resolve_root("user", self.home)
+                return self.diagnose_custom_path(str(root))
+        # 白名单候选：yaml 数据路径
+        from skillos.core.algorithm.discover import discover_potential_runtimes
+        for c in discover_potential_runtimes(self.home):
+            if c.key == key:
+                return self.diagnose_custom_path(str(c.root_path))
+        # 未知 key：结构化错误，不猜（FR-1.0.26 ④"无法判断就报错"精神）
+        return {"path": "", "exists": False, "skill_count": 0,
+                "error": f"未知 runtime key: {key}",
+                "evidence": "local-observed"}
+
     def protocol_status(self) -> dict:
         """协议状态（FR-1.0.29 / T18）：sticky + HEAD trailer + 一致性。
 

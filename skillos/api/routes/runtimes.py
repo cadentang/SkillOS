@@ -104,11 +104,19 @@ async def list_discovered(
             "custom": False, "managed": True, "discover_only": False,
         })
 
-    # candidates 段：白名单命中但 key 还没纳管的（剔除已纳管 custom + builtin）
+    # candidates 段：白名单命中但 key 还没纳管的（剔除已纳管 custom + builtin）。
+    # custom:<slug> 纳管后，白名单同名候选不再重复显示（否则"加入"后
+    # 已纳管 / 未纳管两段都有同一 Runtime —— bug：joinRuntime 生成
+    # custom:cursor 而 managed_keys 只含 custom:cursor 不含 cursor）
     managed_keys = {b["key"] for b in builtins} | {c["key"] for c in custom_items}
+    custom_slugs = {
+        c["key"].split(":", 1)[1]
+        for c in custom_items if ":" in c["key"]
+    }
     candidates = [
         c for c in (daemon_data.get("candidates") or [])
         if c.get("key") and c["key"] not in managed_keys
+        and c["key"] not in custom_slugs
     ]
 
     return {
@@ -199,18 +207,19 @@ async def diagnose_custom(
     user_id: str = Depends(get_current_user_id),
     repo: CloudRepo = Depends(get_repo),
 ) -> dict:
-    """custom Runtime 路径诊断（FR-1.0.33 / D9）。
+    """Runtime 路径诊断（FR-1.0.33 / D9 / FR-2.4.10 已纳管行通用）。
 
-    云端查表拿 root_path → 经 daemon task 校验 path（不存任何状态）。
+    custom：云端查表拿 root_path → daemon task 校验；
+    builtin / 白名单候选：传 key，daemon 端按 adapter / yaml 约定路径解析
+    （云端不知道用户 home，不能自己拼路径 —— T1 root 显式注入原则）。
     """
     rt = repo.get_runtime_by_key(key)
-    if rt is None or rt.adapter_key != "custom":
-        return {"ok": False, "data": None, "error": {
-            "code": "NOT_FOUND",
-            "message": f"custom Runtime 不存在: {key}",
-        }}
+    if rt is not None and rt.adapter_key == "custom":
+        params = {"root_path": rt.root_path}
+    else:
+        params = {"key": key}
     result = await _submit(request, user_id, "runtime_diagnose",
-                            {"root_path": rt.root_path}, timeout=15.0)
+                            params, timeout=15.0)
     if not result.get("ok"):
         return {"ok": False, "data": None,
                 "error": _envelope_error(result.get("error"))}
