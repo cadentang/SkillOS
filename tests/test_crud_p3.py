@@ -99,6 +99,21 @@ class TestCreateSkill:
         with pytest.raises(ValueError, match="VALIDATION"):
             engine.create_skill("brand-new", name="x", description="")
 
+    def test_created_skill_enters_matrix_as_missing(self, env) -> None:
+        """新建未分发的 Skill 必须以 MISSING（待分发）入矩阵（FR-2.1.7）。
+
+        回归锁定：skill_create 不建 binding，status_matrix 的「不适用」
+        skip 会让零 binding + 零磁盘的 skill 四端全跳过 → 行不进矩阵，
+        用户无从看到、无从勾选分发（页面表现为"创建成功但没数据"）。
+        """
+        engine, _ = env
+        engine.init_env()
+        engine.create_skill("brand-new", name="Brand New", description="x" * 40)
+        row = engine.db.get_skill_by_slug("brand-new")
+        cells = [c for c in engine.status_matrix() if c.skill_id == row.id]
+        assert len(cells) == 4  # 四端全部可见
+        assert all(c.state == DriftState.MISSING for c in cells)
+
     def test_create_then_push_synced(self, env) -> None:
         """闭环：新建 → push 四端 SYNCED（模板产物必须可直接分发）。"""
         engine, _ = env

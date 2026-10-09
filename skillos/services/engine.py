@@ -260,15 +260,35 @@ class LocalEngine:
             snapshot = snapshots.get(row.slug)
             if snapshot is None:
                 continue  # skill 行存在但 canonical 缺失：防御，doctor 会报
+            cells: list[DriftReport] = []
             for key, adapter in adapters.items():
                 binding = self.db.get_binding(row.id, key)
                 target = adapter.resolve_root("user", home=self.home) / row.slug
                 disk_exists = target.exists()
                 if not disk_exists and binding is None:
                     continue  # 该 runtime 上不适用
-                out.append(self._one_cell(
+                cells.append(self._one_cell(
                     row.id, key, adapter, snapshot, binding, target, disk_exists,
                 ))
+            if not cells:
+                # 全新 skill（skill_create 后未分发，FR-2.1.7）：零 binding、
+                # 零磁盘，上面四端全被「不适用」skip → 行不进矩阵，用户
+                # 无从看到也无从勾选分发。四端按 MISSING（待分发）入矩阵
+                # ——创建后行即可见、可勾选、可一键分发，首次 push 建立
+                # binding 后回归正常判定。不能复用 _one_cell：binding=None
+                # 且 disk 不存在会落进 classify_imported 误判 MODIFIED。
+                for key, adapter in adapters.items():
+                    out.append(DriftReport(
+                        skill_id=row.id, runtime_key=key,
+                        state=DriftState.MISSING,
+                        base_commit=None, base_adapter_version=None,
+                        base_hash=None,
+                        local_hash=aggregate_hash({}),
+                        remote_hash=aggregate_hash(dict(adapter.render_layout(snapshot))),
+                        adapter_outdated=False, has_untracked_assets=False,
+                    ))
+            else:
+                out.extend(cells)
         return out
 
     def _one_cell(
