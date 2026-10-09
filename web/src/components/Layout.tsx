@@ -5,9 +5,17 @@ import DaemonStatusBadge from "./DaemonStatusBadge";
 import { DaemonStatusProvider } from "../ws/DaemonStatusContext";
 import { endpoints } from "../api/endpoints";
 
-/** Layout。沙盒模式（FR-2.4.3 / 04 §2.7.7）：顶部常驻「演示模式」横幅 ——
- *  沙盒是可写隔离（隔离靠文件系统边界，不靠 UI 禁用），横幅只做标识，
- *  scan / push / pull / 编辑 / 回滚全部可用。 */
+/** Layout（设计稿 app/index.html §03 §04 §05 shell）。
+ *
+ *  结构：
+ *    <Sidebar 236> | <main>
+ *                     ├ 沙盒横幅（演示模式，仅 P7 sandbox 部署存在）
+ *                     ├ topbar（var(--topbar-h)=56，1px 底边）—— daemon 状态 + 业务页面 actions
+ *                     ├ rule
+ *                     └ content（p-lg=24，flex-1）—— Outlet
+ *
+ *  沙盒模式（FR-2.4.3 / 04 §2.7.7）：隔离靠文件系统边界，UI 全可用 —— 横幅只做标识。
+ */
 
 export default function Layout() {
   const health = useQuery({
@@ -20,9 +28,9 @@ export default function Layout() {
 
   return (
     <DaemonStatusProvider>
-      <div className="flex min-h-screen">
+      <div className="flex min-h-screen" style={{ background: "var(--canvas)" }}>
         <Sidebar />
-        <div className="flex-1">
+        <div className="flex min-w-0 flex-1 flex-col">
           {sandbox && (
             <div
               className="px-md py-xs text-center text-[var(--font-caption)]"
@@ -32,12 +40,16 @@ export default function Layout() {
             </div>
           )}
           <header
-            className="flex items-center justify-end border-b px-md"
-            style={{ height: "var(--topbar-h)", borderColor: "var(--border)" }}
+            className="flex shrink-0 items-center justify-between border-b px-lg"
+            style={{ height: "var(--topbar-h)", borderColor: "var(--border)", background: "var(--surface)" }}
           >
-            <DaemonStatusBadge />
+            {/* 左：sandbox 横幅已挤过；详情页可在自己的 content 顶部做面包屑（设计稿 breadcrumbs） */}
+            <div />
+            <div className="flex items-center gap-sm">
+              <DaemonStatusBadge />
+            </div>
           </header>
-          <main className="p-lg">
+          <main className="flex-1 overflow-hidden p-lg">
             <Outlet />
           </main>
         </div>

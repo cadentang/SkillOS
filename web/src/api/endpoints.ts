@@ -56,6 +56,26 @@ export interface LogItem {
   author?: string;
 }
 
+/** 单条日志事件（FR-1.1.12 / 04 §6.2.6）。 */
+export interface LogEvent {
+  ts: string;
+  level: string;
+  logger: string;
+  event: string;
+  op_id?: string;
+  msg?: string;
+  [k: string]: unknown;
+}
+
+/** 日志查询结果（FR-1.1.12）。 */
+export interface LogsResponse {
+  events: LogEvent[];
+  skipped: number;
+  path: string;
+  count?: number;
+  missing?: boolean;
+}
+
 /** 回滚预览/执行结果（FR-2.2.8 / FR-1.0.26 ②）。 */
 export interface RollbackResult {
   ok: boolean;
@@ -335,6 +355,22 @@ export const endpoints = {
   health: () => api.get<{ status: string; sandbox: boolean }>("/api/health"),
   /** 恢复预置演示数据（仅沙盒部署存在；daemon 离线 → 503）。 */
   sandboxReset: () => api.post<{ restored: boolean; skills: string[] }>("/api/sandbox/reset"),
+
+  // ---- P5 日志（FR-1.1.12）----
+  /** 拉取 daemon 本地日志（云端代理 → daemon 端 `logs` 任务）。daemon 离线 → 503。 */
+  logsView: (params: {
+    mode?: "daemon" | "api" | "mcp";
+    tail?: number;
+    level?: "DEBUG" | "INFO" | "WARNING" | "ERROR" | "CRITICAL";
+    op_id?: string;
+  }) => {
+    const q = new URLSearchParams();
+    q.set("mode", params.mode ?? "daemon");
+    q.set("tail", String(params.tail ?? 100));
+    q.set("level", params.level ?? "DEBUG");
+    if (params.op_id) q.set("op_id", params.op_id);
+    return api.get<LogsResponse>(`/api/logs?${q.toString()}`);
+  },
   resolveConflict: (
     slug: string,
     runtimeKey: string,
@@ -350,4 +386,117 @@ export const endpoints = {
         author,
       },
     ),
+
+  // ---- P3 Settings 页（FR-2.4.10 / T26）----
+  // Runtime 自动发现 / 已纳管列表 / custom 诊断 / 协议 / 守护。
+  /** 未纳管 + 已纳管 Runtime 一次返回；前端按 managed 字段切两段。 */
+  runtimesDiscovered: (force = false) =>
+    api.get<DiscoveredResponse>(
+      `/api/runtimes/discovered${force ? "?force=true" : ""}`,
+    ),
+  /** 创建 custom Runtime 空条目（FR-1.0.34 / T25）。key 必须 `custom:<name>`。 */
+  runtimesCreateCustom: (body: {
+    key: string;
+    name?: string;
+    root_path: string;
+    scope?: string;
+    discover_only?: boolean;
+  }) => api.post<DiscoveredRuntime>("/api/runtimes/custom", body),
+  /** 编辑 custom Runtime 路径；discover_only 显式传 = 改。 */
+  runtimesUpdateCustom: (
+    key: string,
+    body: { root_path: string; discover_only?: boolean | null },
+  ) => api.patch<DiscoveredRuntime>(`/api/runtimes/${encodeURIComponent(key)}`, body),
+  /** 删除 custom Runtime（NFR-11.4 / T25），同时清理 binding。 */
+  runtimesDeleteCustom: (key: string) =>
+    api.delete<{ key: string; deleted: boolean }>(
+      `/api/runtimes/${encodeURIComponent(key)}`,
+    ),
+  /** custom Runtime 路径诊断（FR-1.0.33 / D9）：存在性 + 命中数 + 错误透传。 */
+  runtimesDiagnose: (key: string) =>
+    api.get<{
+      path: string;
+      exists: boolean;
+      skill_count: number;
+      error: string | null;
+      evidence: string;
+    }>(`/api/runtimes/${encodeURIComponent(key)}/diagnose`),
+  /** 协议版本状态（FR-1.0.29 / T18）：sticky + HEAD trailer + 一致性。daemon 离线 → 503。 */
+  protocolStatus: () => api.get<ProtocolStatus>("/api/protocol/status"),
+  /** 守护状态（FR-2.4.10 Settings 区块）：云端直读 hub，离线时仍可用。 */
+  daemonStatus: () => api.get<DaemonStatusResponse>("/api/daemon/status"),
+
+  // ---- P3 Settings 页 · Token 区块（FR-2.4.10）----
+  /** 设备列表（已配对 daemon / 撤销时间）。 */
+  listDevices: () => api.get<DeviceItem[]>("/api/devices"),
+  /** 撤销设备（FR-1.2.8）：置 revoked_at + 立即断连该 daemon。 */
+  revokeDevice: (tokenId: string) =>
+    api.delete<{ id: string; revoked: boolean }>(
+      `/api/devices/${encodeURIComponent(tokenId)}`,
+    ),
+  /** 签发配对码（6 位一次性，10 分钟有效）。 */
+  issuePairingCode: () =>
+    api.post<{ code: string; ttl_s: number }>("/api/pairing/code", {}),
 };
+
+// ---- P3 Settings 页（FR-2.4.10 / T26）类型 ----
+
+/** Runtime 条目（discovered / managed / candidates 三段共用）。 */
+export interface DiscoveredRuntime {
+  key: string;
+  name: string;
+  path: string;
+  custom: boolean;
+  managed: boolean;
+  discover_only: boolean;
+  path_exists?: boolean;
+  skill_count?: number;
+  version?: string;
+  enabled?: boolean;
+  scope?: string;
+  created_at?: string | null;
+  evidence?: string;
+  verified_at?: string | null;
+  /** 命中 = 该路径下至少一个 SKILL.md（与 discover 服务端命中判据同语义） */
+  matched?: boolean;
+}
+
+export interface DiscoveredResponse {
+  scanned_at: string | null;
+  home: string | null;
+  managed: DiscoveredRuntime[];
+  candidates: DiscoveredRuntime[];
+}
+
+export interface ProtocolStatus {
+  current_supported: number;
+  sticky_version: number | null;
+  trailer_version: number | null;
+  head_message_first_line: string | null;
+  ok: boolean;
+  read_only: boolean;
+  reason: string | null;
+}
+
+export interface DaemonAgent {
+  agent_id: string;
+  token_id: string;
+  connected_at: number;
+  uptime_s: number;
+}
+
+export interface DaemonStatusResponse {
+  online: boolean;
+  agents: DaemonAgent[];
+  agent_count: number;
+}
+
+/** 配对设备（FR-2.4.10 Token 区块）。 */
+export interface DeviceItem {
+  id: string;
+  agent_id: string;
+  name: string | null;
+  platform: string | null;
+  last_seen_at: string | null;
+  revoked_at: string | null;
+}

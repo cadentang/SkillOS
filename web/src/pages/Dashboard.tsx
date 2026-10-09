@@ -5,14 +5,23 @@ import { ApiError } from "../api/client";
 import ConflictResolveDialog from "../components/ConflictResolveDialog";
 import CreateSkillDialog from "../components/CreateSkillDialog";
 import DriftMatrix from "../components/DriftMatrix";
+import LogsPanel from "../components/LogsPanel";
+import RecentSync from "../components/RecentSync";
 import RemovalsConfirmDialog from "../components/RemovalsConfirmDialog";
-import { StateDot, stateLabel } from "../components/StateChip";
+import { stateLabel } from "../components/StateChip";
 import { useDaemonStatusCtx } from "../ws/DaemonStatusContext";
 
-/** Dashboard（FR-2.1.x）—— 双读者同一页面两种编排（08 §4 R2，不新增页面）：
- *  上半部 OverviewStats + DriftMatrix + BatchActionBar（写 Skill 的人）
- *  下半部 ManagerPanel（决策者：覆盖度 / 僵尸占比 / 门禁计数）
- *  daemon 离线（FR-2.4.4）：读保留 + stale 标注；写按钮全局禁用。 */
+/** Dashboard（FR-2.1.x / 设计稿 app/index.html §03）。
+ *
+ *  业务 topbar：title + 搜索 + 重新扫描 + 一键分发
+ *  上半（写 Skill 的人）：3 个 Stat card + 漂移矩阵 + 最近同步记录
+ *  下半（决策者，FR-2.1.1 双读者同一页面）：治理视图
+ *  日志面板（FR-1.1.12）
+ *  daemon 离线 → 写按钮全局禁用（FR-2.4.4）
+ *
+ *  业务逻辑全保留（批量分发 / conflict 四选一 / removals 守卫 / create skill 等），
+ *  仅重写视觉与少量布局。
+ */
 
 type ItemState = "pending" | "running" | "ok" | "needs-confirm" | "failed";
 
@@ -30,10 +39,12 @@ export default function Dashboard() {
   const [items, setItems] = useState<PushItem[] | null>(null);
   const [confirmPaths, setConfirmPaths] = useState<string[] | null>(null);
   const [showCreate, setShowCreate] = useState(false);
-  /** CONFLICT 四选一（P3）：点 CONFLICT 格 → 弹 dialog 选定 → 调 API */
+  /** CONFLICT 四选一（P3 / FR-2.2.6）：点 CONFLICT 格 → 弹 dialog 选定 → 调 API */
   const [resolveTarget, setResolveTarget] = useState<
     { slug: string; runtimeKey: string } | null
   >(null);
+  /** 全局搜索（FR-2.1.6）：本地模糊过滤 name / description / tag，本期纯前端预览 */
+  const [search, setSearch] = useState("");
 
   const drift = useQuery({
     queryKey: ["drift"],
@@ -55,7 +66,12 @@ export default function Dashboard() {
     staleTime: Infinity, // 沙盒标志部署期不变（与 Layout 共享缓存）
   });
 
-  const rows = drift.data?.rows ?? [];
+  const allRows = drift.data?.rows ?? [];
+  const filteredRows = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return allRows;
+    return allRows.filter((r) => r.slug.toLowerCase().includes(q));
+  }, [allRows, search]);
   const summary = drift.data?.summary ?? {};
   const manager = drift.data?.manager;
 
@@ -67,7 +83,7 @@ export default function Dashboard() {
       return next;
     });
   const toggleAll = (checked: boolean) =>
-    setSelected(checked ? new Set(rows.map((r) => r.slug)) : new Set());
+    setSelected(checked ? new Set(filteredRows.map((r) => r.slug)) : new Set());
 
   const pushMutation = useMutation({
     mutationFn: ({
@@ -158,7 +174,6 @@ export default function Dashboard() {
       }
     }
     void drift.refetch();
-    // 汇总全部待确认删除路径 → 弹 RemovalsConfirmDialog（FR-2.4.7）
     setItems((prev) => {
       const paths = (prev ?? []).flatMap((p) => p.removals);
       if (paths.length) setConfirmPaths(paths);
@@ -194,12 +209,16 @@ export default function Dashboard() {
 
   const stale = drift.data?.stale ?? false;
   const sandbox = health.data?.sandbox ?? false;
+  const totalSkills = manager?.total_skills ?? allRows.length;
+
+  // 优先高严重度状态汇总（用于 Stat card drift alarm）
+  const driftAlarm = (summary.CONFLICT ?? 0) + (summary.OUTDATED ?? 0) + (summary.MODIFIED ?? 0) + (summary.MISSING ?? 0);
 
   return (
     <div className="flex flex-col gap-lg">
-      {/* ---------- 上半部：写 Skill 的人读 ---------- */}
-      <section>
-        <div className="flex items-baseline justify-between">
+      {/* ─────── 业务 topbar：title + 搜索 + 重新扫描 + 一键分发 ─────── */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-baseline gap-sm">
           <h1 className="font-semibold" style={{ fontSize: "var(--font-h1)" }}>
             能力总览
           </h1>
@@ -212,80 +231,228 @@ export default function Dashboard() {
             </span>
           )}
         </div>
-
-        {/* OverviewStats：总数 / 状态分布 */}
-        <div className="mt-md flex flex-wrap gap-md">
-          <StatCard label="Skill 总数" value={manager?.total_skills ?? rows.length} />
-          {Object.entries(summary)
-            .sort((a, b) => b[1] - a[1])
-            .map(([state, n]) => (
-              <StatCard
-                key={state}
-                label={<StateDot state={state} />}
-                value={n}
-              />
-            ))}
-        </div>
-
-        {/* BatchActionBar（FR-2.1.4）：离线全局禁写 */}
-        <div
-          className="mt-md flex items-center gap-md rounded-[var(--radius-control)] border px-md py-sm"
-          style={{ borderColor: "var(--border)", background: "var(--surface)" }}
-        >
+        <div className="flex items-center gap-sm">
+          {/* 全局搜索（FR-2.1.6）—— 设计稿 search 形态 */}
+          <div
+            className="flex h-9 items-center gap-sm"
+            style={{
+              width: 280,
+              padding: "0 12px",
+              background: "var(--surface-alt)",
+              border: "1px solid var(--border)",
+              borderRadius: "var(--radius-control)",
+            }}
+          >
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden>
+              <circle cx="7" cy="7" r="4.5" stroke="#99A3B2" strokeWidth="1.6" />
+              <path d="M10.5 10.5L14 14" stroke="#99A3B2" strokeWidth="1.6" strokeLinecap="round" />
+            </svg>
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="搜索 Skill…"
+              className="min-w-0 flex-1 bg-transparent text-[13px] outline-none"
+              style={{ color: "var(--text-primary)" }}
+            />
+          </div>
           <button
+            type="button"
+            disabled={!daemon.connected}
+            onClick={() => void drift.refetch()}
+            className="h-9 rounded-[var(--radius-control)] border px-md text-[13px] font-medium disabled:opacity-40"
+            style={{ background: "var(--surface)", borderColor: "var(--border)", color: "var(--text-primary)" }}
+          >
+            重新扫描
+          </button>
+          <button
+            type="button"
             disabled={!daemon.connected || selected.size === 0 || pushMutation.isPending}
             onClick={() => runPush([...selected])}
-            className="rounded-[var(--radius-control)] px-md py-sm font-medium text-[var(--inverse)] disabled:opacity-40"
+            className="h-9 rounded-[var(--radius-control)] px-md text-[13px] font-medium text-[var(--inverse)] disabled:opacity-40"
             style={{ background: "var(--primary)" }}
           >
             一键分发（{selected.size}）
           </button>
+        </div>
+      </div>
+
+      {/* ─────── 上半：能力总览（写者） ─────── */}
+      <section>
+        {/* 3 个 stat card（设计稿 .stat 248宽 gap-16） */}
+        <div className="flex flex-wrap gap-md">
+          <StatCard
+            label="Skill 总数"
+            value={totalSkills}
+            delta={`已纳管 ${allRows.length} · 漂移告警 ${driftAlarm}`}
+          />
+          <StatCard
+            label="漂移告警"
+            value={driftAlarm}
+            accent={driftAlarm > 0 ? "var(--danger)" : undefined}
+            delta={
+              `冲突 ${summary.CONFLICT ?? 0} · ` +
+              `未同步 ${summary.OUTDATED ?? 0} · ` +
+              `手改 ${summary.MODIFIED ?? 0}`
+            }
+          />
+          <StatCard
+            label="daemon 状态"
+            value={daemon.connected ? "在线" : "离线"}
+            accent={daemon.connected ? "var(--success)" : "var(--danger)"}
+            delta={daemon.connected ? "WS 已建立 · 实时事件驱动" : "WS 未连接 · 数据可能过期"}
+          />
+        </div>
+
+        {/* 漂移矩阵 card（设计稿 .card + matrix 表格 44 行高 / col 118） */}
+        <div
+          className="mt-md flex flex-col rounded-[var(--radius-card)] border"
+          style={{ background: "var(--surface)", borderColor: "var(--border)" }}
+        >
+          <div className="flex items-center justify-between p-md">
+            <div>
+              <div className="font-semibold" style={{ fontSize: "var(--font-h2)" }}>
+                四端漂移矩阵
+              </div>
+              <div
+                className="mt-xs text-[var(--font-caption)]"
+                style={{ color: "var(--text-tertiary)" }}
+              >
+                行 = Skill · 列 = Runtime · 格 = 漂移状态
+              </div>
+            </div>
+            <div className="flex items-center gap-md">
+              <LegendItem color="var(--drift-synced)" text="已同步" />
+              <LegendItem color="var(--drift-outdated)" text="待分发" />
+              <LegendItem color="var(--drift-conflict)" text="需处理" />
+            </div>
+          </div>
+          <div className="h-px w-full" style={{ background: "var(--divider)" }} />
+          <div className="px-md py-md">
+            <DriftMatrix
+              rows={filteredRows}
+              selected={selected}
+              onToggle={toggle}
+              onToggleAll={toggleAll}
+              onResolveConflict={(slug, runtimeKey) => setResolveTarget({ slug, runtimeKey })}
+            />
+          </div>
+        </div>
+
+        {/* 最近同步记录 card */}
+        <div className="mt-md">
+          <RecentSync />
+        </div>
+      </section>
+
+      {/* ─────── 下半：治理视图（FR-2.1.1 双读者同一页面 / 08 §4 R2） ─────── */}
+      <section>
+        <h2 className="font-semibold" style={{ fontSize: "var(--font-h2)" }}>
+          治理视图
+        </h2>
+        <div className="mt-md flex flex-wrap gap-md">
+          <StatCard
+            label="覆盖度（同步格 / 全部格）"
+            value={`${manager?.coverage_pct ?? 0}%`}
+          />
+          <StatCard label="僵尸 Skill 占比" value={`${manager?.zombie_pct ?? 0}%`} />
+          <StatCard
+            label="门禁 error"
+            value={gateTotals ? gateTotals.errors : "—"}
+            accent={gateTotals && gateTotals.errors > 0 ? "var(--danger)" : undefined}
+          />
+          <StatCard
+            label="门禁 warn"
+            value={gateTotals ? gateTotals.warns : "—"}
+            accent={gateTotals && gateTotals.warns > 0 ? "var(--warning)" : undefined}
+          />
+        </div>
+        {manager && (
+          <p
+            className="mt-sm text-[var(--font-caption)]"
+            style={{ color: "var(--text-secondary)" }}
+          >
+            健康度分布：
+            {Object.entries(manager.health)
+              .map(([s, n]) => `${stateLabel(s)} ${n}`)
+              .join(" · ") || "暂无"}
+            {gateTotals ? ` · 门禁覆盖 ${gateTotals.skills} 个 Skill` : " · daemon 离线，门禁计数不可用"}
+          </p>
+        )}
+      </section>
+
+      {/* 日志面板（P5 / FR-1.1.12）：同一页面编排（08 §4 R2） */}
+      <LogsPanel defaultTail={200} />
+
+      {/* ─────── 创建 Skill 与分发结果 / 守门弹窗（沿用项目原 dial；保留业务） ─────── */}
+      <div
+        className="rounded-[var(--radius-control)] border p-md"
+        style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+      >
+        <div className="flex items-center gap-md">
           <button
+            type="button"
             disabled={!daemon.connected}
             onClick={() => setShowCreate(true)}
-            className="rounded-[var(--radius-control)] px-md py-sm disabled:opacity-40"
-            style={{ background: "var(--surface)", border: "1px solid var(--primary-border)", color: "var(--primary)" }}
-            title="新建 Skill（FR-2.1.7）：创建后用「一键分发」推到四端"
+            className="rounded-[var(--radius-control)] px-md py-sm text-[13px] disabled:opacity-40"
+            style={{
+              background: "var(--surface)",
+              border: "1px solid var(--primary-border)",
+              color: "var(--primary)",
+            }}
+            title="新建 Skill（FR-2.1.7）"
           >
             + 新建 Skill
           </button>
           {sandbox && (
             <button
+              type="button"
               disabled={!daemon.connected || sandboxResetMutation.isPending}
               onClick={() => sandboxResetMutation.mutate()}
-              className="rounded-[var(--radius-control)] px-md py-sm disabled:opacity-40"
-              style={{ background: "var(--surface)", border: "1px solid var(--border)", color: "var(--warning)" }}
-              title="重置沙盒数据（FR-3.10）：恢复预置演示数据，评委可反复体验"
+              className="rounded-[var(--radius-control)] px-md py-sm text-[13px] disabled:opacity-40"
+              style={{
+                background: "var(--surface)",
+                border: "1px solid var(--border)",
+                color: "var(--warning)",
+              }}
+              title="重置沙盒数据（FR-3.10）"
             >
               {sandboxResetMutation.isPending ? "重置中…" : "重置沙盒数据"}
             </button>
           )}
-          {sandboxResetMutation.isError && (
-            <span className="text-[var(--font-caption)]" style={{ color: "var(--danger)" }}>
-              重置失败：{sandboxResetMutation.error instanceof Error
-                ? sandboxResetMutation.error.message : "未知错误"}
-            </span>
-          )}
-          <span className="text-[var(--font-caption)]" style={{ color: "var(--text-secondary)" }}>
+          <span
+            className="text-[var(--font-caption)]"
+            style={{ color: "var(--text-secondary)" }}
+          >
             {!daemon.connected
               ? "本地 daemon 已离线，写操作禁用"
               : selected.size === 0
-                ? "勾选矩阵行后分发；单 Skill 冲突不阻塞其余"
-                : "分发 canonical → 四端 Runtime"}
+                ? "勾选矩阵行后用顶部「一键分发」；单 Skill 冲突不阻塞其余"
+                : `已选 ${selected.size} 个 Skill，等待分发`}
           </span>
         </div>
 
-        {/* 逐项进度与结果（FR-2.1.4） */}
-        {items && (
-          <div
-            className="mt-md rounded-[var(--radius-control)] border px-md py-sm"
-            style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+        {sandboxResetMutation.isError && (
+          <span
+            className="mt-sm block text-[var(--font-caption)]"
+            style={{ color: "var(--danger)" }}
           >
+            重置失败：
+            {sandboxResetMutation.error instanceof Error
+              ? sandboxResetMutation.error.message
+              : "未知错误"}
+          </span>
+        )}
+
+        {items && (
+          <div className="mt-md">
             <p className="font-medium">分发结果</p>
-            <ul className="mt-sm flex flex-col gap-xs">
+            <ul className="mt-xs flex flex-col gap-xs">
               {items.map((p) => (
                 <li key={p.slug} className="flex items-center gap-sm">
-                  <span style={{ minWidth: 140 }} className="font-mono text-[var(--font-mono)]">
+                  <span
+                    style={{ minWidth: 140 }}
+                    className="font-mono text-[var(--font-mono)]"
+                  >
                     {p.slug}
                   </span>
                   <span
@@ -312,61 +479,19 @@ export default function Dashboard() {
             </ul>
           </div>
         )}
+      </div>
 
-        {/* DriftMatrix（FR-2.1.2） */}
-        <div
-          className="mt-md rounded-[var(--radius-card)] border p-md"
-          style={{ background: "var(--surface)", borderColor: "var(--border)" }}
-        >
-          <DriftMatrix rows={rows} selected={selected} onToggle={toggle} onToggleAll={toggleAll}
-          onResolveConflict={(slug, runtimeKey) => setResolveTarget({ slug, runtimeKey })} />
-        </div>
-      </section>
-
-      {/* ---------- 下半部：决策者读（ManagerPanel，同一页面 FR-2.1.1） ---------- */}
-      <section>
-        <h2 className="font-semibold" style={{ fontSize: "var(--font-h2)" }}>
-          治理视图
-        </h2>
-        <div className="mt-md flex flex-wrap gap-md">
-          <StatCard label="覆盖度（同步格 / 全部格）" value={`${manager?.coverage_pct ?? 0}%`} />
-          <StatCard label="僵尸 Skill 占比" value={`${manager?.zombie_pct ?? 0}%`} />
-          <StatCard
-            label="门禁 error"
-            value={gateTotals ? gateTotals.errors : "—"}
-            accent={gateTotals && gateTotals.errors > 0 ? "var(--danger)" : undefined}
-          />
-          <StatCard
-            label="门禁 warn"
-            value={gateTotals ? gateTotals.warns : "—"}
-            accent={gateTotals && gateTotals.warns > 0 ? "var(--warning)" : undefined}
-          />
-        </div>
-        {manager && (
-          <p className="mt-sm text-[var(--font-caption)]" style={{ color: "var(--text-secondary)" }}>
-            健康度分布：
-            {Object.entries(manager.health)
-              .map(([s, n]) => `${stateLabel(s)} ${n}`)
-              .join(" · ") || "暂无"}
-            {gateTotals ? ` · 门禁覆盖 ${gateTotals.skills} 个 Skill` : " · daemon 离线，门禁计数不可用"}
-          </p>
-        )}
-      </section>
-
-      {/* CreateSkillDialog（P3，FR-2.1.7）：新建入口，对话框不是新页面 */}
       {showCreate && (
         <CreateSkillDialog
           onCancel={() => setShowCreate(false)}
           onCreated={() => {
             setShowCreate(false);
-            // 新 Skill 入矩阵（未分发态）；门禁汇总与治理视图一并失效
             void queryClient.invalidateQueries({ queryKey: ["drift"] });
             void queryClient.invalidateQueries({ queryKey: ["gate"] });
           }}
         />
       )}
 
-      {/* RemovalsConfirmDialog（FR-2.4.7）：限高 + 滚动 + 按钮常在屏内 */}
       {confirmPaths && confirmPaths.length > 0 && (
         <RemovalsConfirmDialog
           paths={confirmPaths}
@@ -375,7 +500,6 @@ export default function Dashboard() {
         />
       )}
 
-      {/* ConflictResolveDialog（P3，FR-2.2.6 / T22）：CONFLICT 四选一 */}
       {resolveTarget && (
         <ConflictResolveDialog
           slug={resolveTarget.slug}
@@ -395,29 +519,64 @@ export default function Dashboard() {
   );
 }
 
+/* ────────────────────────────────────────────────────────────────────── */
+
 function StatCard({
   label,
   value,
+  delta,
   accent,
 }: {
-  label: React.ReactNode;
+  label: string;
   value: React.ReactNode;
+  delta?: React.ReactNode;
   accent?: string;
 }) {
   return (
     <div
-      className="min-w-[140px] rounded-[var(--radius-card)] border px-md py-sm"
-      style={{ background: "var(--surface)", borderColor: "var(--border)" }}
+      className="flex min-w-[200px] flex-1 flex-col gap-xs p-md"
+      style={{
+        background: "var(--surface)",
+        border: "1px solid var(--border)",
+        borderRadius: "var(--radius-card)",
+      }}
     >
-      <p className="text-[var(--font-caption)]" style={{ color: "var(--text-secondary)" }}>
+      <span
+        className="text-[var(--font-caption)] font-medium"
+        style={{ color: "var(--text-secondary)" }}
+      >
         {label}
-      </p>
-      <p
-        className="mt-xs font-semibold"
-        style={{ fontSize: "var(--font-h2)", color: accent ?? "var(--text-primary)" }}
+      </span>
+      <span
+        className="font-bold tabular-nums leading-tight"
+        style={{ fontSize: 26, color: accent ?? "var(--text-primary)" }}
       >
         {value}
-      </p>
+      </span>
+      {delta && (
+        <span
+          className="text-[var(--font-caption)]"
+          style={{ color: "var(--text-tertiary)" }}
+        >
+          {delta}
+        </span>
+      )}
     </div>
+  );
+}
+
+function LegendItem({ color, text }: { color: string; text: string }) {
+  return (
+    <span
+      className="flex items-center gap-sm text-[var(--font-caption)]"
+      style={{ color: "var(--text-secondary)" }}
+    >
+      <span
+        className="inline-block shrink-0 rounded-[3px]"
+        style={{ width: 10, height: 10, background: color }}
+        aria-hidden
+      />
+      {text}
+    </span>
   );
 }

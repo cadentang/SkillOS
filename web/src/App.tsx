@@ -2,6 +2,7 @@ import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import Layout from "./components/Layout";
 import Dashboard from "./pages/Dashboard";
 import Login from "./pages/Login";
+import RuntimeSettings from "./pages/RuntimeSettings";
 import SkillDetail from "./pages/SkillDetail";
 import Teams from "./pages/Teams";
 import { tokenStore } from "./api/client";
@@ -29,6 +30,7 @@ export default function App() {
         <Route path="/" element={<Dashboard />} />
         <Route path="/skills" element={<Navigate to="/" replace />} />
         <Route path="/skills/:slug" element={<SkillDetail />} />
+        <Route path="/runtimes" element={<RuntimeSettings />} />
         <Route path="/teams" element={<Teams />} />
       </Route>
     </Routes>
