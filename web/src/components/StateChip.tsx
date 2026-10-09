@@ -43,15 +43,15 @@ export function StateDot({ state }: { state: string }) {
   );
 }
 
-/** 矩阵格：色块 + 状态缩写；两类徽标（FR-1.0.19/20）。 */
+/** 矩阵格：色块 + 中文状态（色 + 形双编码：色块是"色"、中文即"形"，比 3 字母更可读）；两类徽标（FR-1.0.19/20）。 */
 export function StateCell({ state, title }: { state: string; title?: string }) {
   return (
     <span
       title={title ?? stateLabel(state)}
-      className="inline-flex items-center justify-center rounded-[var(--radius-tag)] px-sm py-xs text-[var(--font-caption)] text-[var(--inverse)]"
+      className="inline-flex items-center justify-center rounded-[var(--radius-tag)] px-sm py-xs text-[var(--font-caption)] text-[var(--inverse)] whitespace-nowrap"
       style={{ background: stateColor(state), opacity: state === "SYNCED" ? 0.9 : 1 }}
     >
-      {state.slice(0, 3)}
+      {stateLabel(state)}
     </span>
   );
 }
