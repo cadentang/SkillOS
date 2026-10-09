@@ -360,7 +360,21 @@ class TestWsTaskRoundtrip:
             ws.send_json({"type": "event", "event": "drift_changed",
                           "user_id": uid, "payload": {"matrix": matrix}})
             ws.send_json({"type": "ping"})
-            assert ws.receive_json() == {"type": "pong"}
+            # 重连自愈（FR-1.0.34）：register 后云端可能插入
+            # runtime_sync_custom task —— 回 result 后继续等 pong
+            # （真实 daemon 同样处理 task 再回 pong）
+            for _ in range(3):
+                msg = ws.receive_json()
+                if msg.get("type") == "pong":
+                    break
+                if msg.get("type") == "task":
+                    ws.send_json({
+                        "type": "result",
+                        "request_id": msg["request_id"],
+                        "payload": {"ok": True, "data": {"synced": 0, "removed": 0}},
+                    })
+            else:
+                raise AssertionError("3 条消息内未收到 pong")
 
         r = client.get("/api/sync/status", headers={"Authorization": f"Bearer {token}"})
         assert r.status_code == 200

@@ -302,6 +302,18 @@ def create_app(db_url: str | None = None, jwt_secret: str | None = None,
                 return
 
             await app.state.hub.register_agent(conn)
+
+            # 重连自愈（FR-1.0.34）：daemon 一上线立即对齐 custom Runtime。
+            # 离线期间云端建的 custom（如 custom:trae）在此补推 →
+            # 漂移矩阵列 / 分发目标即时可用，不依赖用户刷新页面。
+            # fire-and-forget：对齐失败不影响 WS 循环，下次读时再试。
+            async def _sync_custom_on_connect(uid: str = conn.user_id) -> None:
+                try:
+                    from skillos.api.routes.runtimes import _push_custom_sync
+                    await _push_custom_sync(app, uid)
+                except Exception:  # noqa: BLE001 —— 自愈尽力而为
+                    pass
+            asyncio.create_task(_sync_custom_on_connect())
             try:
                 while True:
                     msg = await _recv_json(ws, timeout=None)

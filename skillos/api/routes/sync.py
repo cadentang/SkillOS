@@ -73,7 +73,7 @@ async def _live_matrix(request: Request, user_id: str) -> list[dict] | None:
     """
     try:
         from skillos.api.routes.runtimes import _push_custom_sync
-        await _push_custom_sync(request, user_id)
+        await _push_custom_sync(request.app, user_id)
     except Exception:  # noqa: BLE001 —— 对齐尽力而为，不阻塞矩阵读取
         pass
     try:
