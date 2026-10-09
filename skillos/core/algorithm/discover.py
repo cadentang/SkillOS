@@ -1,6 +1,6 @@
 """Runtime 约定俗成探测（FR-1.0.32 / T24 / D8 / FR-2.4.10）。
 
-白名单 = 数据（discover/builtin_potential_runtimes.yaml），本模块**零字面量
+白名单 = 数据（builtin_potential_runtimes.yaml），本模块**零字面量
 路径**（`~/.cursor` 等），新增 / 删除探测项只动 yaml。命中判据仅 =
 该路径下存在至少一个 SKILL.md（沿用 list_content_files 单一入口，T16）。
 
@@ -22,7 +22,7 @@ import yaml
 
 from skillos.core.algorithm.hash import FileEntry, list_content_files
 
-_WHITELIST_PATH = Path(__file__).parent / "discover" / "builtin_potential_runtimes.yaml"
+_WHITELIST_PATH = Path(__file__).parent / "builtin_potential_runtimes.yaml"
 
 
 @dataclass(frozen=True)
