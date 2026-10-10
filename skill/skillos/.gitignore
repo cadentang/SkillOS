@@ -1,0 +1,24 @@
+# 构建期注入的编译载荷（体积大、随平台而异；由 build/build.py 生成）
+runtime/
+
+# 构建期注入的兜底运行时（便携 CPython / MinGit；同样随平台而异）
+vendor/win-x64/
+vendor/mac-arm64/
+vendor/mac-x64/
+vendor/linux-x64/
+vendor/linux-arm64/
+vendor/wheel/
+
+# 构建期生成的零安装入口与清单
+start.cmd
+start.sh
+BUILD-INFO.json
+README.txt
+
+# 保留规约文件
+!vendor/manifest.json
+!vendor/README.md
+
+# 本包内不产生其它构建产物
+__pycache__/
+*.pyc

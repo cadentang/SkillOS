@@ -1,0 +1,75 @@
+{
+  "_note": "Skill OS 一体化 Skill 包发行清单。声明本发行物需要哪些运行时、端口、落位；detect / bootstrap / start / status 全部以此为准。想切换『源码形态 ↔ frozen / 二进制形态』或改端口，只改这里，不改脚本。",
+  "name": "skillos",
+  "launcher_version": "0.1.0",
+  "skillos_version": "0.1.0",
+  "protocol_version": 1,
+  "mode": "auto",
+  "host": "127.0.0.1",
+  "ports": {
+    "backend": 9080,
+    "web_dev": 5173
+  },
+  "paths": {
+    "state_dir": "~/.skillos/launcher",
+    "state_file": "state.json",
+    "secret_file": "secret",
+    "logs_dir": "logs",
+    "cloud_db": "~/.skillos/cloud.db"
+  },
+  "runtimes": {
+    "python": {
+      "min": "3.11",
+      "pin": null,
+      "required": true,
+      "vendor": "uv",
+      "note": "系统有且达标即用系统；否则回落 vendor 内 uv 托管的 CPython。pin 非空时（如 \"3.11\"）表示 ABI 锁定：只有同一小版本可用 —— 这是 frozen 编译发行形态的要求（.pyd 只认编译它的 CPython），构建期由 build/build.py 写入。"
+    },
+    "git": {
+      "min": null,
+      "required": true,
+      "vendor": "mingit",
+      "vendor_platforms": ["win-x64"],
+      "note": "POSIX 系统自带，不打包；Windows 缺则用 MinGit 便携包"
+    },
+    "node": {
+      "min": "20",
+      "required": false,
+      "dev_only": true,
+      "vendor": null,
+      "note": "终端用户永不需要；仅 --dev 热更新 + 构建 web/dist 时用"
+    }
+  },
+  "components": {
+    "backend": { "module": "skillos.api.asgi:app", "health": "/api/health", "runner": "uvicorn" },
+    "daemon": { "entry": "skillos daemon", "cloud_path": "/ws/agent" },
+    "web": { "dist": "runtime/web", "dev_src": "web/dist", "dev_port": 5173 }
+  },
+  "binary": {
+    "_note": "全量编译形态（docs/10 route=standalone）的角色映射。dir 相对 **本包根**，故整个包可任意搬移。仓库内的这份是布局说明与默认值；build/build.py 会把发行包里的 manifest 生成为 mode=dist + 实测角色名。判据是『能不能真的找到 server 二进制』—— 所以在源码仓库里它不会误判。frozen（D1）形态不用本块，改用下面的 frozen 块。",
+    "shared": true,
+    "roles": {
+      "cli":    { "dir": "runtime/skillos", "name": "skillos" },
+      "mcp":    { "dir": "runtime/skillos", "name": "skillos-mcp" },
+      "server": { "dir": "runtime/skillos", "name": "skillos-server" },
+      "daemon": { "dir": "runtime/skillos", "name": "skillos-daemon" }
+    }
+  },
+  "frozen": {
+    "_note": "D1 编译发行形态（docs/10 route=module，默认路线）：skillos 被编成一个扩展模块（.pyd/.so），第三方依赖装进随包 venv。dir 是 PYTHONPATH 注入点（默认 `runtime/skillos`），requirements 是第三方清单（默认 `runtime/requirements.txt`），均相对本包根。**构建期由 build/build.py 写入到发行包的 manifest 里**；仓库内这份为 null 表示『不启用』（源码仓库里走 repo 形态）。判据同样看实物：能否在 dir 下找到 .pyd/.so。",
+    "dir": null,
+    "requirements": null,
+    "python_tag": null,
+    "python_pin": null
+  },
+  "mirrors": {
+    "_note": "包源（pip / npm）。null = 官方源。国内网络直连 PyPI / npm 常慢到不可用，建议 `--mirror cn`（pip 清华 + npm npmmirror）或设环境变量 SKILLOS_PIP_INDEX。优先级：CLI > 环境变量 > 本块 > 官方。",
+    "pip_index": null,
+    "npm_registry": null
+  },
+  "account": {
+    "_note": "本地首次配对用的账号（会被自动注册，409 幂等）。公司私有化部署请用 --email/--password 或环境变量覆盖。",
+    "email": "demo@skillos.dev",
+    "password": "skillos-demo"
+  }
+}

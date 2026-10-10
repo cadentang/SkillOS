@@ -1,0 +1,71 @@
+{
+  "_note": "vendor 二进制锁定表。每个 artifacts 条目 = 一个平台的一份可下载产物。sha256 必须填真实值，校验不过一律拒绝安装。用 scripts/vendor_fetch.py --hash <文件> 计算 sha256，或 --list 查看待办。",
+  "_layout": "下载解压后落到 vendor/<platform>/ 下，文件名见各条目的 `into`。",
+  "_offline": "离线机器：在能联网的机器上跑 vendor_fetch.py，把产出的 vendor/<platform>/ 整个目录拷过去即可，无需再改任何配置。",
+  "uv": {
+    "version": "0.5.0",
+    "note": "Astral uv —— 用于在系统无 Python 时自举一个托管 CPython。单文件、跨平台。",
+    "artifacts": {
+      "win-x64": {
+        "url": "https://github.com/astral-sh/uv/releases/download/0.5.0/uv-x86_64-pc-windows-msvc.zip",
+        "sha256": "",
+        "kind": "zip",
+        "into": "win-x64/uv.exe"
+      },
+      "mac-arm64": {
+        "url": "https://github.com/astral-sh/uv/releases/download/0.5.0/uv-aarch64-apple-darwin.tar.gz",
+        "sha256": "",
+        "kind": "tar.gz",
+        "into": "mac-arm64/uv"
+      },
+      "mac-x64": {
+        "url": "https://github.com/astral-sh/uv/releases/download/0.5.0/uv-x86_64-apple-darwin.tar.gz",
+        "sha256": "",
+        "kind": "tar.gz",
+        "into": "mac-x64/uv"
+      },
+      "linux-x64": {
+        "url": "https://github.com/astral-sh/uv/releases/download/0.5.0/uv-x86_64-unknown-linux-gnu.tar.gz",
+        "sha256": "",
+        "kind": "tar.gz",
+        "into": "linux-x64/uv"
+      }
+    }
+  },
+  "mingit": {
+    "version": "2.47.1",
+    "note": "仅 Windows 需要（Git for Windows 的 no-installer 便携版，VS Code / GitHub Desktop 同款）。",
+    "artifacts": {
+      "win-x64": {
+        "url": "https://github.com/git-for-windows/git/releases/download/v2.47.1.windows.1/MinGit-2.47.1-64-bit.zip",
+        "sha256": "",
+        "kind": "zip",
+        "into": "win-x64/MinGit"
+      }
+    }
+  },
+  "python": {
+    "version": "3.13",
+    "note": "可选：离线预置一份 python-build-standalone 的 CPython。有它则 uv 无需联网也能建环境。",
+    "artifacts": {
+      "win-x64": {
+        "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20241016/cpython-3.13.0+20241016-x86_64-pc-windows-msvc-install_only.tar.gz",
+        "sha256": "",
+        "kind": "tar.gz",
+        "into": "win-x64/python"
+      },
+      "mac-arm64": {
+        "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20241016/cpython-3.13.0+20241016-aarch64-apple-darwin-install_only.tar.gz",
+        "sha256": "",
+        "kind": "tar.gz",
+        "into": "mac-arm64/python"
+      },
+      "linux-x64": {
+        "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20241016/cpython-3.13.0+20241016-x86_64-unknown-linux-gnu-install_only.tar.gz",
+        "sha256": "",
+        "kind": "tar.gz",
+        "into": "linux-x64/python"
+      }
+    }
+  }
+}
