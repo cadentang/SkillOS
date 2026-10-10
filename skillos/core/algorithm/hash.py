@@ -51,6 +51,29 @@ def is_excluded(rel_posix: str) -> bool:
     return False
 
 
+def _is_embedded_skill_container(path: Path, root: Path) -> bool:
+    """嵌入 plugin/cache bundle 布局跳过（镜像 xingkongliang/skills-manager
+    `core/project_scanner.rs::should_skip_dir`）。
+
+    场景：某些工具（典型如 Claude Code 插件）将 skill 部署在
+    ``<bundle>/<version>/skills/<skill>/SKILL.md`` 这类**嵌套容器**里 —— 那是
+    其他工具的缓存副本，不是用户 own 的 skill。不下钻、不枚举，避免污染 hash
+    与漂移判定，也让 ``discover_potential_runtimes`` 的"未纳管候选"段不被
+    cache 副本虚高计数。
+
+    判定：``path != root`` 且 ``path`` 下还有 ``skills/`` 子树。
+    ``path == root`` 时永不 skip —— 探测根本身可能就叫 ``skills``
+    （如 ``~/.claude/skills``），不能让它自己 skip 自己。
+    符号链接由调用方 ``os.walk(followlinks=False)`` 负责不跟，本函数无需再判。
+    """
+    if path == root:
+        return False
+    try:
+        return (path / "skills").is_dir()
+    except OSError:
+        return False
+
+
 # ---------------------------------------------------------------- 第一级：字节级哈希
 
 
@@ -124,6 +147,8 @@ def list_content_files(root: Path) -> list[FileEntry]:
     """枚举 root 下的内容文件（相对 root 的 POSIX 路径）。
 
     - 排除集由 is_excluded() 统一判定（① + ③），不在此另立
+    - 嵌入 plugin/cache bundle 布局（``<X>/<Y>/skills/<Z>/...``）由
+      _is_embedded_skill_container() 判定并整段不下钻（其他工具的缓存副本）
     - 超过 ASSET_MAX_BYTES 的单文件标记 in_git=False、内容不读入（T2）
     - is_text 由 is_foldable_text 判定（供 diff / 渲染层参考）
     - 顺序确定（按路径排序），与遍历顺序无关
@@ -146,6 +171,7 @@ def list_content_files(root: Path) -> list[FileEntry]:
             d
             for d in dirnames
             if not is_excluded((cur / d).relative_to(root).as_posix())
+            and not _is_embedded_skill_container(cur / d, root)
         )
         for name in sorted(filenames):
             path = cur / name

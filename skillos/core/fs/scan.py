@@ -70,9 +70,23 @@ def scan_root(root: Path, spec: RootSpec, ignore: frozenset[str]) -> list[Scanne
     if not root.is_dir():
         return []
     out: list[ScannedSkill] = []
+    # 防环兜底（镜像 xingkongliang/skills-manager collect_skill_dirs_recursive
+    # `visited: HashSet<PathBuf>`）：canonicalize 后的去重集。同物理目录被多
+    # 条路径访问时不重复枚举 —— 根本身是 symlink、或跨平台 resolve 行为差异
+    # 的最后兜底（os.walk(followlinks=False) + is_symlink 二次过滤已覆盖大
+    # 部分情况）。resolve 失败时回退原路径，跟对方一致不抛错。
+    seen: set[Path] = set()
     # os.walk(followlinks=False)：不进符号链接目录（防环）；先序确保父目录先命中
     for dirpath, dirnames, _filenames in os.walk(root, followlinks=False):
         cur = Path(dirpath)
+        try:
+            canon = cur.resolve()
+        except OSError:
+            canon = cur
+        if canon in seen:
+            dirnames[:] = []  # 已访问过的物理目录：不下钻
+            continue
+        seen.add(canon)
         # 过滤：排除集 + 调用方附加 ignore + 符号链接目录（不跟随）
         dirnames[:] = sorted(
             d
