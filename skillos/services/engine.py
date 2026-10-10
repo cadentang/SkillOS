@@ -119,9 +119,14 @@ def resolve_home() -> Path:
     """入口层 home 解析（T1 / FR-2.4.3）：SKILLOS_ROOT 指向容器内虚拟目录。
 
     沙盒隔离靠把 root 全部指向容器内实现 —— 本函数只在入口层
-    （CLI / daemon / doctor）读环境变量并显式传参，core/fs 全程无感知。
+    （CLI / daemon / doctor / MCP）读环境变量并显式传参，core/fs 全程无感知。
+
+    变量名以 **SKILLOS_ROOT** 为准（T1 约定，CLI/daemon/engine 都用它）；
+    `SKILLOS_HOME` 保留为**历史兼容别名**（早期 MCP 入口用过），两者同时
+    存在时 SKILLOS_ROOT 优先。收敛到这一处，避免各入口各读一个变量而分裂
+    （曾导致容器部署下 MCP 忽略 SKILLOS_ROOT、退回真实 ~/.skillos）。
     """
-    root = os.environ.get("SKILLOS_ROOT")
+    root = os.environ.get("SKILLOS_ROOT") or os.environ.get("SKILLOS_HOME")
     return Path(root) if root else Path.home()
 
 

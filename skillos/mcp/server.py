@@ -23,7 +23,6 @@ MCP 是与 CLI / daemon 平行的第三入口：直接调 services 层（LocalEn
 
 from __future__ import annotations
 
-import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -37,7 +36,7 @@ from skillos.core.logging import (
     reset_op_context,
     setup_logging,
 )
-from skillos.services.engine import LocalEngine, default_env
+from skillos.services.engine import LocalEngine, default_env, resolve_home
 
 mcp = FastMCP("skillos", instructions=(
     "Skill OS —— 个人 AI Skill 操作系统。写入类工具默认 dry_run=true，"
@@ -51,10 +50,15 @@ _engine: LocalEngine | None = None
 
 
 def get_engine() -> LocalEngine:
-    """进程内单例。SKILLOS_HOME 供沙盒/测试重定向（T1：路径显式）。"""
+    """进程内单例。home 走引擎层统一解析（SKILLOS_ROOT，兼容 SKILLOS_HOME）。
+
+    收敛到 resolve_home()：这里曾单独读 SKILLOS_HOME，与 CLI/daemon 读的
+    SKILLOS_ROOT 分裂 —— 容器部署下 MCP 会忽略 SKILLOS_ROOT 而退回真实
+    home，读到宿主机上的 ~/.claude/skills。现在三个入口共用同一处解析。
+    """
     global _engine
     if _engine is None:
-        home = Path(os.environ.get("SKILLOS_HOME") or Path.home())
+        home = resolve_home()
         _engine = LocalEngine(default_env(home), home=home)
     return _engine
 
