@@ -245,7 +245,9 @@ def _add_pid_tid(_: Any, __: str, event_dict: MutableMapping[str, Any]) -> Mutab
     return event_dict
 
 
-def _scrub_sensitive(_: Any, __: str, event_dict: MutableMapping[str, Any]) -> MutableMapping[str, Any]:
+def _scrub_sensitive(
+    _: Any, __: str, event_dict: MutableMapping[str, Any]
+) -> MutableMapping[str, Any]:
     """Scrubber 字段（04 §6.2.3）：
 
     1. 字段名（大小写不敏感）匹配 _SENSITIVE_KEYS → 置 _REDACTED

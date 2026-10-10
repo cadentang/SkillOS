@@ -19,6 +19,12 @@ on:
 permissions:
   contents: read
 
+# Windows runner 的默认 stdout 编码是 cp1252 —— 构建脚本里的中文日志会直接把
+# Python 进程打断（见 build/build.py 顶部的 reconfigure）。脚本层已各自兜底，
+# 这里再在 workflow 层加一道，保护本流程里其余/以后新增的 python 步骤。
+env:
+  PYTHONUTF8: "1"
+
 jobs:
   # ---------------------------------------------------------------- 前端
   web:
@@ -87,7 +93,10 @@ jobs:
       - name: Install project + Nuitka + uv
         run: |
           python -m pip install --upgrade pip
-          pip install nuitka uv
+          # 锁上限：Nuitka 4.x 的开关集已在 build.py::verify_flags() 里逐条对账过
+          # （4.2.2 与 4.3 完全一致）。不封顶意味着 5.0 一发布就可能在无人察觉时
+          # 改掉 CLI，而这条流水线只在打 tag 时跑 —— 失败会直接卡住发版。
+          pip install "nuitka>=4.2,<5" uv
           pip install -e .
         working-directory: .
 

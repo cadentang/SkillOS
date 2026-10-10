@@ -14,10 +14,8 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import sys
-import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime
@@ -61,13 +59,13 @@ def _iter_log_lines(
             yield from lines[-tail:]
         return
     with path.open("r", encoding="utf-8", errors="replace") as f:
-        for line in f:
-            yield line
+        yield from f
     if follow:
         # 占位：daemon / api 通常常驻，--follow 需配套 follow 子进程退出信号；
         # 本期不实装，提示用户用 `tail -f` 替代
         sys.stderr.write(
-            "[yellow]--follow 暂未实装（建议直接用 `tail -F ~/.skillos/logs/daemon.log`）[/yellow]\n"
+            "[yellow]--follow 暂未实装"
+            "（建议直接用 `tail -F ~/.skillos/logs/daemon.log`）[/yellow]\n"
         )
 
 

@@ -42,7 +42,10 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
-    "ruff>=0.4",
+    # 封顶：ruff 每个 0.x 都会新增/收紧规则，不封顶意味着 CI 会在某天「没改代码
+    # 也变红」（本仓库已实测：0.16.9 报 23 条，更新版本报的条数不同）。CI 里的
+    # lint 与本地必须是同一套规则集，改动才可复现。
+    "ruff>=0.16.9,<0.17",
 ]
 
 [project.scripts]

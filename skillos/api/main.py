@@ -15,7 +15,6 @@ import json
 import os
 import secrets
 import time
-import uuid
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware

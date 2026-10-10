@@ -13,7 +13,8 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query as FastAPIQuery, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import Query as FastAPIQuery
 
 from skillos.api.deps import get_current_user_id
 from skillos.core.constants import WS_TASK_OPS

@@ -32,7 +32,7 @@ import json
 import os
 import tempfile
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -138,7 +138,7 @@ def _compute_signature(
     h.update(yaml_bytes)
     h.update(b"\x00\xff")  # yaml 段与 path 段分隔（防 yaml 末尾拼到首行 key）
     for key, path, exists in sorted(key_path_exists):
-        h.update(f"{key}\x00{path}\x00{1 if exists else 0}\n".encode("utf-8"))
+        h.update(f"{key}\x00{path}\x00{1 if exists else 0}\n".encode())
     return h.hexdigest()
 
 
@@ -168,7 +168,7 @@ def _read_cache(cache_path: Path) -> dict[str, Any] | None:
         ts = datetime.fromisoformat(computed_at)
     except ValueError:
         return None
-    if (datetime.now(timezone.utc) - ts).total_seconds() > _DISCOVERY_CACHE_TTL_S:
+    if (datetime.now(UTC) - ts).total_seconds() > _DISCOVERY_CACHE_TTL_S:
         return None
     return data
 
@@ -183,7 +183,7 @@ def _write_cache(cache_path: Path, signature: str, items: list[Candidate]) -> No
     data = {
         "version": _CACHE_VERSION,
         "signature": signature,
-        "computed_at": datetime.now(timezone.utc).isoformat(),
+        "computed_at": datetime.now(UTC).isoformat(),
         "results": [c.to_dict() for c in items],
     }
     tmp_path: str | None = None

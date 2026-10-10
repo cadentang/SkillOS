@@ -24,7 +24,6 @@ MCP 是与 CLI / daemon 平行的第三入口：直接调 services 层（LocalEn
 from __future__ import annotations
 
 from collections.abc import Callable
-from pathlib import Path
 from typing import Any
 
 import anyio

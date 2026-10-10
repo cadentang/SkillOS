@@ -1747,7 +1747,10 @@ class LocalEngine:
         云端 handler 经 'protocol_status' task 调用；本地 home 是 self.home 下的 repo_root。
         """
         from skillos.core.fs.protocol import (
-            CURRENT_PROTOCOL, check, parse_trailer, read_sticky,
+            CURRENT_PROTOCOL,
+            check,
+            parse_trailer,
+            read_sticky,
         )
         head_message: str | None = None
         try:
@@ -1763,7 +1766,9 @@ class LocalEngine:
             "current_supported": CURRENT_PROTOCOL,
             "sticky_version": sticky,
             "trailer_version": trailer,
-            "head_message_first_line": (head_message or "").splitlines()[0] if head_message else None,
+            "head_message_first_line": (
+                (head_message or "").splitlines()[0] if head_message else None
+            ),
             "ok": chk.ok,
             "read_only": chk.read_only,
             "reason": chk.reason,

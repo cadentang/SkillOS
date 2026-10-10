@@ -64,6 +64,15 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+# 同 build.py：GitHub Actions 的 Windows runner 上 stdout 是管道、编码取到 cp1252，
+# 而本脚本的检查标签含中文 —— 不在最早的这一步钉成 UTF-8，修好 build.py 之后
+# 会在冒烟步再崩一次（同一根因，两个脚本）。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):   # 非 TextIOWrapper / 已 detach
+        pass
+
 REPO = Path(__file__).resolve().parent.parent
 DIST_ROOT = REPO / "build" / "dist"
 SMOKE = REPO / "build" / "out" / "smoke"

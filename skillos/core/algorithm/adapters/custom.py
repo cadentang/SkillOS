@@ -19,8 +19,8 @@ from pathlib import Path
 
 from skillos.core.algorithm.adapters.base import (
     PathSpec,
-    RuntimePaths,
     RuntimeAdapter,
+    RuntimePaths,
 )
 from skillos.core.model import SkillMeta
 

@@ -56,6 +56,19 @@ import sysconfig
 import time
 from pathlib import Path
 
+# GitHub Actions 的 Windows runner 上，stdout 是**管道**而不是终端 —— Python 按
+# locale 取到 cp1252，于是第一句中文日志就把整个进程带走（实测 CI win-x64 构建
+# 0 秒退出、连 Nuitka 都没启动，报 `'charmap' codec can't encode ... position 13-14`，
+# 13-14 正好是 "=== Skill OS 构建" 里的「构建」两字）。
+# 这里在**任何输出之前**把两个流钉成 UTF-8；errors="replace" 兜底，换任何终端 /
+# 管道都不会再因编码失败。（stderr 默认已是 backslashreplace，所以当时只看到
+# `\u672a\u9884...` 转义而没看到中文。）
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):   # 非 TextIOWrapper（如被替换过）/ 已 detach
+        pass
+
 REPO = Path(__file__).resolve().parent.parent
 BUILD = REPO / "build"
 OUT = BUILD / "out"
@@ -537,11 +550,22 @@ def build_module(spec: dict, pk: str, dry: bool) -> Path | None:
         die(f"构建报告成功，但 {out_dir} 下找不到 {pkg}.cp*.pyd / {pkg}*.so —— 拒绝假报成功。")
     pyd = cands[-1]
 
-    tag = mod.get("python_tag")
-    if tag and tag not in pyd.name:
-        die(f"产物名 `{pyd.name}` 里没有 {tag} —— 构建机的 Python 不是 "
-            f"{spec['python'].get('pin')}。\n"
-            f"      → 见 docs/10 §2「ABI 锁定」。")
+    tag = mod.get("python_tag")           # Windows 口径，如 cp311
+    if tag:
+        # **同一 ABI 两种命名**（实测）：
+        #   Windows  → <pkg>.cp311-win_amd64.pyd
+        #   macOS    → <pkg>.cpython-311-darwin.so
+        #   Linux    → <pkg>.cpython-311-x86_64-linux-gnu.so
+        # `cpython-311` 里**不含**子串 `cp311`，所以只认 Windows 写法会把 mac/linux
+        # 全部误判成「构建机 Python 版本不对」（CI 上 3 个平台都栽在这句）。两种都认。
+        forms = {tag}
+        m = re.fullmatch(r"cp(\d+)", tag)
+        if m:
+            forms.add(f"cpython-{m.group(1)}")   # cp311 → cpython-311（注意：无小数点）
+        if not any(f in pyd.name for f in forms):
+            die(f"产物名 `{pyd.name}` 里没有 {' / '.join(sorted(forms))} —— 构建机的 "
+                f"Python 不是 {spec['python'].get('pin')}。\n"
+                f"      → 见 docs/10 §3.1「ABI 锁定」。")
 
     copied = copy_data_files(spec, out_dir)
     log(f"  ✓ {pyd.name}  {human(pyd.stat().st_size)}")

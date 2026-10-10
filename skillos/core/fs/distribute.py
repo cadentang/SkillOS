@@ -36,11 +36,6 @@ dry_run 与真跑共用同一判据（FR-1.3.7）：预览返回的 held_back / 
 
 from __future__ import annotations
 
-from skillos.core.logging import get_logger
-
-log = get_logger("skillos.services.sync")
-
-
 import os
 import shutil
 import time
@@ -51,7 +46,10 @@ from pathlib import Path
 
 from skillos.core.algorithm.adapters.base import RuntimeAdapter
 from skillos.core.algorithm.hash import aggregate_hash, hash_bytes, list_content_files
+from skillos.core.logging import get_logger
 from skillos.core.model import SkillSnapshot
+
+log = get_logger("skillos.services.sync")
 
 
 class ReplacePolicy(StrEnum):
