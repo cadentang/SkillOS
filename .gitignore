@@ -3,7 +3,15 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .eggs/
-build/
+# 注意：仓库根的 build/ 是**编译发行管线源码目录**（docs/10），
+# 所以这里不能写 `build/` —— 那会把它整个吃掉。只忽略其生成物。
+build/out/
+build/dist/
+# 编译用的隔离 venv（含整套 Nuitka，65MB / 3556 文件）—— 绝不能被提交
+build/.venv-build/
+build/*.build/
+build/*.onefile-build/
+build/*.report.xml
 dist/
 .venv/
 venv/

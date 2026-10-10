@@ -1,0 +1,137 @@
+# 编译发行 workflow（第二步：Nuitka 编译管线）。
+#
+# 为什么编译必须放 CI 而不是"谁本地编一下"：
+#   * 产物按平台各一份，单人手上不可能同时有 Win / Linux / macOS 三套编译器；
+#   * 编译是**唯一**把源码变成"客户看不见"的环节，必须可复现、可追溯（commit + tag）；
+#   * Nuitka 的失败模式（漏 include、数据文件没随包）**只在运行期暴露**，
+#     所以在同一条流水线里紧跟 build/smoke.py，构建即验证。
+#
+# 触发：打 tag（v0.1.0）或手动。PR 不跑 —— 全平台 Nuitka 构建耗时以十分钟计，
+# 不该拖慢日常 CI（日常校验由 ci.yml 的 pytest / web / docker 三 job 负责）。
+
+name: Release (compiled)
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------- 前端
+  web:
+    name: Build web (SPA)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install
+        working-directory: web
+        run: npm ci
+      - name: Build (tsc -b && vite build)
+        working-directory: web
+        run: npm run build
+      - name: Upload dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+          retention-days: 1
+
+  # ---------------------------------------------------------------- 编译
+  compile:
+    name: Compile (${{ matrix.platform }})
+    needs: web
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # D1（route=module）把构建机钉在 Python 3.11：产物是 cp311-*.pyd，
+          # 只认 CPython 3.11 的 ABI。3.11 也正好能用 --mingw64，
+          # Windows runner 无需 MSVC 也能编（Nuitka 自动拉 MinGW64，约 255MB）。
+          - os: windows-latest
+            platform: win-x64
+          - os: ubuntu-latest
+            platform: linux-x64
+          # macOS 两个架构分属不同镜像，不能共用同一个标签：
+          #   macos-15       = Apple Silicon (arm64)，3 vCPU / 7 GB
+          #   macos-15-intel = Intel (x64)，4 vCPU / 14 GB
+          # 别用 macos-13：该镜像已于 2025-12-04 完全退役，任务会直接失败而非降级。
+          # 也别用 macos-15-large / -xlarge：那是 larger runner，私有仓库要额外计费。
+          - os: macos-15
+            platform: mac-arm64
+          - os: macos-15-intel
+            platform: mac-x64
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # Linux 的产物需要 patchelf 才能修正 rpath，否则换机器就找不到 .so
+      - name: Install patchelf (Linux)
+        if: matrix.platform == 'linux-x64'
+        run: sudo apt-get update && sudo apt-get install -y patchelf
+
+      - name: Install project + Nuitka + uv
+        run: |
+          python -m pip install --upgrade pip
+          pip install nuitka uv
+          pip install -e .
+        working-directory: .
+
+      - name: Verify deps importable
+        run: python -c "from skillos.api.asgi import app; print('asgi import OK')"
+
+      - name: Fetch web dist
+        uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+
+      - name: Sanity (web dist present)
+        run: test -f web/dist/index.html
+
+      # 便携 CPython：CI 有网，交给 build.py 的 uv 回落自动预置。
+      # （本地构建用 `--vendor-python <目录>` 指定已有的一份，避免重复下载。）
+      - name: Prefetch portable CPython
+        run: uv python install 3.11 --install-dir build/out/vendor-python
+
+      - name: Build compiled distribution
+        run: |
+          VERSION="${{ github.ref_name }}"
+          if [ -z "$VERSION" ] || [ "$VERSION" = "main" ]; then VERSION="0.0.0"; fi
+          python build/build.py --version-string "$VERSION"
+
+      - name: Smoke (形态保密 + 运行时 + CLI + MCP + ASGI 四重自证)
+        run: python build/smoke.py --dist "build/dist/skillos-${{ matrix.platform }}" --mirror none
+
+      - name: Upload distribution
+        uses: actions/upload-artifact@v4
+        with:
+          name: skillos-${{ matrix.platform }}
+          path: |
+            build/dist/skillos-${{ matrix.platform }}
+            build/dist/skillos-*.zip
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Upload Nuitka report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuitka-report-${{ matrix.platform }}
+          path: build/out/**/*.report.xml
+          retention-days: 7
+          if-no-files-found: ignore

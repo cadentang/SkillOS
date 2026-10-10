@@ -1,0 +1,217 @@
+{
+  "_note": "Skill OS 编译发行规格 —— 本文件是编译管线的唯一真相。改这里，不改 build.py。",
+  "_why": "两条路线共用这一份规格，由顶层 route 选择：module（默认，D1）与 standalone（退路，A）。",
+
+  "spec_version": 2,
+
+  "route": "module",
+  "_route_why": "D1（2026-10-10 定案，实测）：只把 skillos 自身 76 个模块编成机器码，第三方公开依赖交给 venv。冷编译 10 分 50 秒（standalone 全量 2.5 小时，快 14 倍），产物 skillos.cp311-win_amd64.pyd 4.5 MB。保密需求只覆盖我们自己的代码，编 95% 的公开代码是纯浪费。",
+
+  "product": {
+    "name": "skillos",
+    "display_name": "Skill OS",
+    "company": "Skill OS",
+    "copyright": "Skill OS",
+    "description": "Skill OS —— 个人 AI Skill 操作系统（CLI / daemon / MCP / Web 控制台）"
+  },
+
+  "python": {
+    "min": "3.11",
+    "pin": "3.11",
+    "max_exclusive": "3.14",
+    "_note": "route=module 时产物是 cp311-*.pyd，**只认 CPython 3.11** —— pin 就是这条 ABI 锁。构建机与运行机都必须是 3.11.x。standalone 路线不受 pin 约束，只需满足 [min, max_exclusive)。"
+  },
+
+  "nuitka": {
+    "min_version": "2.8",
+    "_note": "2.8 起编译模式由 --standalone 改为 --mode=standalone（4.x 已移除旧名）。build.py 会拿 `nuitka --help` 逐条校验我们发出的开关，版本改名会在组装阶段被点名而不是编译中途。"
+  },
+
+  "module": {
+    "nuitka_mode": "package",
+    "_nuitka_mode_why": "Nuitka 官方对『整包编成一个扩展模块』的专用模式（--help：\"package\" compiles a whole package into an extension module）。实测 4.2.2 可用，产物 skillos.cp311-win_amd64.pyd，子模块按包路径可正常 import。注意不能用 --mode=module：它只编单个模块，子模块不进去（实测 ModuleNotFoundError: No module named 'mymod.core'）。",
+    "package": "skillos",
+    "python_tag": "cp311",
+    "abi_tag": "win_amd64",
+    "_abi_why": "用于校验产物文件名与 manifest.frozen 的声明是否一致；不一致说明构建机的 Python 不是 3.11。",
+    "force_include_package": true,
+    "_force_include_why": "package 模式已按包遍历，再叠一层 --include-package=skillos 强制把包内每个模块都收进去 —— 防止包内存在『按字符串加载』的模块被静态分析漏掉。实测组合无冲突、无告警。",
+    "exclude_site_packages": true,
+    "_exclude_site_packages_why": "扫描构建 venv 的 site-packages，把所有第三方顶层包自动生成为 --nofollow-import-to。这一步是 D1 的核心：它让 1560 个第三方模块不参与编译，只保留运行时 import 能力（由随包 venv 提供）。新增依赖会自动被排除，无需手工维护清单。",
+    "never_exclude": ["skillos"],
+    "_never_exclude_why": "skillos 是我们要编的包；且构建 venv 里它是以 editable 安装出现的，会被扫描到，必须排除在排除清单外。",
+    "escape_deployment_flag": true,
+    "_escape_why": "Nuitka 有个部署安全阀：一旦发现『代码 import 了被 --nofollow-import-to 排除的模块』就硬失败（ImportError: Module 'X' was actively excluded）。D1 的设计恰恰是『故意排除第三方、运行期从 venv 取』，所以必须加 --no-deployment-flag=excluded-module-usage 关掉它。这条是实测踩出来的。"
+  },
+
+  "standalone": {
+    "nuitka_mode": "standalone",
+    "_why": "退路（route=standalone）：把第三方一并编进去，产出完全自足、彻底零依赖的发行物。代价是冷构建约 2.5 小时（1637 个模块 / 941 MB C 源码 / -O3）。ccache 已生效，第二次起会快很多。切换方式：把顶层 route 改成 standalone 即可，无需改 build.py。",
+    "shared_runtime": {
+      "enabled": true,
+      "_why": "三个角色依赖集高度重叠。共享一份 standalone 运行时，再把可执行文件复制成三个名字，按 argv[0] 分派 —— 体积从约 3×150MB 收到约 150MB。",
+      "dispatcher": "build/entrypoints/skillos_main.py",
+      "aliases": {
+        "skillos": "build/entrypoints/skillos_main.py",
+        "skillos-mcp": "build/entrypoints/skillos_main.py",
+        "skillos-server": "build/entrypoints/skillos_main.py",
+        "skillos-daemon": "build/entrypoints/skillos_main.py"
+      }
+    },
+    "targets": [
+      {
+        "name": "skillos",
+        "output_filename": "skillos",
+        "entry": "build/entrypoints/skillos_main.py",
+        "console": true,
+        "primary": true,
+        "_role": "共享运行时主构建（shared_runtime.enabled 时只构建这一个）"
+      },
+      {
+        "name": "skillos-cli-only",
+        "output_filename": "skillos",
+        "entry": "build/entrypoints/skillos_cli.py",
+        "console": true,
+        "fallback_only": true
+      },
+      {
+        "name": "skillos-mcp-only",
+        "output_filename": "skillos-mcp",
+        "entry": "build/entrypoints/skillos_mcp.py",
+        "console": true,
+        "fallback_only": true
+      },
+      {
+        "name": "skillos-server-only",
+        "output_filename": "skillos-server",
+        "entry": "build/entrypoints/skillos_server.py",
+        "console": true,
+        "fallback_only": true
+      }
+    ],
+    "include_packages": [
+      {
+        "name": "uvicorn",
+        "why": "Config.load() 用 import_from_string 按字符串加载 loop/http/ws/lifespan 实现类（uvicorn.loops.*、uvicorn.protocols.*），静态分析一律抓不到。"
+      },
+      {
+        "name": "sqlalchemy",
+        "why": "方言按 URL 字符串经 registry 动态 import（sqlalchemy.dialects.sqlite.pysqlite）；且 dialects/__init__ 用惰性 _import_dict。"
+      },
+      {
+        "name": "anyio",
+        "why": "后端实现（anyio._backends._asyncio / _trio）由 get_all_backends 按名 import_module 加载。"
+      },
+      {
+        "name": "filelock",
+        "why": "get_platform_api() 在运行期 import_module('filelock._unix' / '._windows' / '._soft') 决定平台实现（05 P0-3 定的跨平台锁）。"
+      },
+      {
+        "name": "websockets",
+        "why": "v13+ 的顶层 websockets.connect 走 lazy_import/__getattr__ 惰性加载，daemon 的 WS 客户端依赖它。"
+      },
+      {
+        "name": "email_validator",
+        "why": "pydantic 的 EmailStr 在**校验时**才 import email_validator（api/routes/auth.py 用到），静态分析抓不到。依赖已在 pyproject.toml 声明为 `pydantic[email]>=2.7`（2026-10-10 修）。"
+      },
+      {
+        "name": "pydantic",
+        "why": "pydantic 内部有按名加载的路径（plugins / deprecated 转发）+ pydantic_core 原生扩展需随包带走。"
+      },
+      {
+        "name": "mcp",
+        "why": "MCP SDK 的 FastMCP 按传输方式解析子模块（mcp.server.stdio 等），且工具注册走装饰器 + 运行期反射。"
+      },
+      {
+        "name": "rich",
+        "why": "CLI 表格/回溯渲染按名加载 pygments 词法类与 _unicode_data。"
+      },
+      {
+        "name": "pygments",
+        "why": "rich 的 Syntax/Traceback 渲染才用到，属惰性依赖。"
+      },
+      {
+        "name": "yaml",
+        "why": "PyYAML 存在可选 C 扩展 _yaml，静态跟随可能漏；显式带上保证 frontmatter 解析两形态一致。"
+      }
+    ],
+    "_include_packages_note": "以上 11 条只在 route=standalone 时生效（module 路线把它们全部排除）。每条都注明『为什么静态分析抓不到』。"
+  },
+
+  "include": {
+    "modules": ["skillos"],
+    "data_files": [
+      {
+        "src": "skillos/core/algorithm/builtin_potential_runtimes.yaml",
+        "dest": "skillos/core/algorithm/builtin_potential_runtimes.yaml",
+        "why": "discover.py 用 Path(__file__).parent 读它做 Runtime 白名单。"
+      }
+    ],
+    "_data_files_note": "关键坑（实测）：**--include-data-files 在 module/package 模式下不落盘**。build.py 改为编译成功后按 <输出目录>/<dest> 显式拷贝。位置由 __file__ 决定 —— package 模式下 __file__ 是虚拟路径 `<输出目录>/<包名>/<原相对路径>`，所以 dest 必须保持包的相对结构。",
+    "distributions": [],
+    "_distributions_note": "skillos 内部不调 importlib.metadata（版本号硬编码在 skillos/__init__.py），故无需 --include-distribution-metadata。"
+  },
+
+  "exclude": {
+    "packages": [
+      {"name": "pytest", "why": "开发依赖，不进发行物"},
+      {"name": "ruff", "why": "开发依赖"},
+      {"name": "alembic", "why": "正式迁移口径未启用（store/db.py 走 create_all + 幂等轻量迁移），运行期无人 import"},
+      {"name": "uvloop", "why": "Windows 上不可用；我们显式钉 loop=asyncio"},
+      {"name": "httptools", "why": "uvicorn auto 的候选实现；已钉 http=h11，不为它多背一个 C 扩展"},
+      {"name": "tkinter", "why": "GUI，永不使用"},
+      {"name": "IPython", "why": "非依赖，防止被间接拖入"},
+      {"name": "matplotlib", "why": "非依赖，防止被间接拖入"}
+    ],
+    "_note": "以上 8 条是**两条路线共用**的排除项（module 路线在这之上还会自动追加 site-packages 全量扫描结果）。"
+  },
+
+  "python_flags": ["no_docstrings"],
+  "_python_flags_why": "no_docstrings：编译期剥离文档字符串。属于『抬高逆向门槛』的顺手一刀，同时也减小体积。注意这只是抬高门槛，不是 DRM（见 docs/10 §5）。",
+
+  "frozen_runtime": {
+    "bundle_portable_cpython": true,
+    "_bundle_why": "发行物自带便携 CPython，用户**零安装**。实测 `uv python install 3.11` 下载 24 MB / 解压 76 MB，耗时 1 分 37 秒。位置必须落在 <包根>/vendor/<平台>/python —— 这正是启动层既有的『检测优先 → 回落 vendor』机制的落位，代码一行不用改就能识别。",
+    "python_version": "3.11",
+    "vendor_subdir": "python",
+    "bundle_uv": false,
+    "_bundle_uv_why": "自带 CPython 后，uv 自举那条路用不上了，省一份二进制。若某天想去掉便携 CPython 改为在线自举，把这个改成 true 并放入 uv。"
+  },
+
+  "runtime_requirements": {
+    "file": "requirements.txt",
+    "_why": "frozen 形态下 launcher 只装第三方、不装 skillos（skillos 由 .pyd 提供）。所以需要一份运行时依赖清单随包下发。",
+    "source": "pyproject",
+    "_source_why": "**默认从 pyproject.toml 的 [project].dependencies 原样生成（不 pin）**。为什么不 pin：实测 `pip freeze` 会把构建机上的偶然版本一起固化 —— 本次就冻出了 `attrs==26.1.0`，而源上根本没有这个版本（最高 25.3.0），用户装到一半必然失败。依赖版本由 pyproject 的区间约束 + pip 解析决定，更稳。要可复现构建可改成 \"freeze\"（那时请自行保证构建机能解析出全部 pin 版本）。",
+    "must_contain": ["fastapi", "uvicorn", "sqlalchemy", "mcp", "pydantic"],
+    "_must_contain_why": "最低限度的健全性校验：清单若被误裁剪，构建期就报错，而不是等用户装完才发现跑不起来。"
+  },
+
+  "platforms": {
+    "win-x64": {
+      "compiler": "auto",
+      "_compiler_why": "auto 由 build.py 的 check_compiler() 按构建机的 Python 版本决定：**Python ≤ 3.12 用 mingw64**（Nuitka 自动下载，无需装 Visual Studio）；**Python ≥ 3.13 只能 msvc** —— 上游未提供 3.13 的 MinGW 构建，Nuitka 实测直接 FATAL：`cannot use '--mingw64' on Python version 3.13 or higher`。route=module 把构建机钉在 3.11，所以总是 mingw64。",
+      "console_mode": "attach",
+      "_console_mode_why": "attach：在终端里跑就有控制台，被 detached 拉起（launcher 起后端/daemon）就不会弹黑窗。仅 standalone 路线用得上。",
+      "vendor_extra": ["MinGit"]
+    },
+    "linux-x64": {},
+    "mac-arm64": {},
+    "mac-x64": {}
+  },
+
+  "assemble": {
+    "skill_src": "skill/skillos",
+    "skill_dest": ".",
+    "payload_dest": "runtime",
+    "_skill_why": "装配产物**本身就是一个 skill 包**：仓库里的 skill/skillos/（SKILL.md + manifest.json + scripts/ + references/）原样落到包根，编译载荷注入包内 runtime/ 下。整目录可搬移、可压缩交付，也可直接拷进 Agent 的 skills 目录（SKILL.md 在根即被识别）。",
+    "_payload_dest_why": "载荷（.pyd + 数据树 / 前端 / 依赖清单）统一放包内 runtime/ 下，与 skill 元数据同级。因此 manifest.frozen.dir 写 `runtime/skillos`（相对包根），不再是早期的 `../skillos` —— 那要求载荷在包外平级，交付物就不是一个自足的 skill 了。",
+    "web_dist": "web/dist",
+    "web_dist_dest": "runtime/web",
+    "_web_why": "前端随包走预构建产物 → 终端用户永不需要 Node（manifest 里 node.dev_only=true）。构建期必须 npm run build 且不发 sourcemap。",
+    "entry_scripts": ["start.cmd", "start.sh"],
+    "_entry_scripts_why": "**自举闭环的最后一块**：start.py 本身是 Python 脚本，若用户机器完全没有 Python 就无从启动。故构建期生成两个薄壳放在包根，直接调用包内自带的 CPython（缺则回落系统 python）。",
+    "extra_docs": [],
+    "_extra_docs_why": "留空：发行包对客户交付，只带 skill 自身文件（SKILL.md / scripts / references / manifest / README / BUILD-INFO）。仓库工程文档（如 CODEBUDDY.md）不随包。要额外随包哪份文档，填相对路径即可。"
+  }
+}
