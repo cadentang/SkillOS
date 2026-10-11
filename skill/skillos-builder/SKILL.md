@@ -64,7 +64,11 @@ git push origin vX.Y.Z
 SKILLOS_GH_TOKEN=<用户刚生成的 token> python scripts/release_pull.py            # 最新成功 run
 SKILLOS_GH_TOKEN=xxx python scripts/release_pull.py --run <run_id>             # 指定 run
 SKILLOS_GH_TOKEN=xxx python scripts/release_pull.py --list                     # 先看清单不下载
+SKILLOS_GH_TOKEN=xxx python scripts/release_pull.py --jobs 8                   # 并发连接数（默认 5）
 ```
+
+> 5 个 artifact 共约 390MB，**脚本默认 5 并发** —— 单连接会被 CDN 限速（实测 51 KB/s ≈ 2 小时，
+> 并发后 700 KB/s ≈ 10 分钟）。下载全部成功才动归档区，中途失败不留半套。
 
 **第 6 步 · 交付前审查（必跑，不过不交付）**
 

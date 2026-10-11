@@ -420,7 +420,12 @@ def audit_archive(zip_path: Path) -> None:
         manifest = next((n for n in names if n.endswith("manifest.json")), None)
         bi = next((n for n in names if n.endswith("BUILD-INFO.json")), None)
         if not skill_md:
-            rec("fail", "ARCHIVE", f"{zip_path.name} 内无 SKILL.md")
+            if zip_path.name.startswith("skillos-"):
+                rec("fail", "ARCHIVE", f"{zip_path.name} 内无 SKILL.md ⇒ 交付包不完整")
+            else:
+                # web-dist.zip 这类只是前端压缩包，本就没有 SKILL.md —— 不是交付缺陷
+                rec("ok", "ARCHIVE",
+                    f"{zip_path.name}: 非交付包（无 SKILL.md）—— 跳过包内核验")
             return
         if not manifest:
             rec("fail", "ARCHIVE", f"{zip_path.name} 内无 manifest.json")

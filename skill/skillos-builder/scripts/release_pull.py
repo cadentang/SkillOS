@@ -10,15 +10,20 @@
     SKILLOS_GH_TOKEN=github_pat_xxx python scripts/release_pull.py            # 拉最新成功 run
     SKILLOS_GH_TOKEN=xxx python scripts/release_pull.py --run 38063781796     # 指定 run id
     SKILLOS_GH_TOKEN=xxx python scripts/release_pull.py --list                # 只看清单，不下载
+    SKILLOS_GH_TOKEN=xxx python scripts/release_pull.py --jobs 8              # 并发连接数（默认 5）
     echo <token> | python scripts/release_pull.py --token-stdin               # 管道传 token
 
 行为：
   1. 选 run：release.yml 最近一次 success（或 --run 指定）
-  2. 下载 4 个 skillos-<平台> artifact + web-dist
+  2. **并发**下载 4 个 skillos-<平台> artifact + web-dist（默认 5 连接）
   3. 平台 artifact 内含两层：交付 zip（skillos-<版本>-<平台>.zip）+ 解包目录；
      只取**交付 zip** 存入归档区；web-dist 原样存为 web-dist.zip
   4. 清掉归档区旧内容（只有最新版本）
   5. 写 RELEASE-INFO.json（版本 / run / commit / sha256 清单），供事后核验
+
+为什么并发：artifact 下载是 302 → Azure 签名 CDN，**单连接常被限速**。实测同一批
+390MB（4 平台 + web-dist），单线程只有 51 KB/s（约 2 小时），并发后恢复数倍。
+下载全部成功才会动归档区 —— 中途失败不会留下半套归档。
 
 退出码：0 成功；2 参数/网络/token 问题；1 拉到了但校验不过。
 """
@@ -26,6 +31,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import hashlib
 import json
 import os
@@ -33,6 +39,7 @@ import re
 import shutil
 import sys
 import tempfile
+import time
 import urllib.request
 import zipfile
 from datetime import datetime, timezone
@@ -157,6 +164,8 @@ def main() -> None:
     ap.add_argument("--repo", default="cadentang/SkillOS")
     ap.add_argument("--run", type=int, default=None, help="指定 run id；缺省取最新成功的 release run")
     ap.add_argument("--list", action="store_true", help="只列出将拉取的 artifact，不下载")
+    ap.add_argument("--jobs", type=int, default=5,
+                    help="并发下载连接数（默认 5；单连接被 CDN 限速时调大更快，1 = 串行）")
     ap.add_argument("--token-stdin", action="store_true", help="从 stdin 第一行读 token")
     ap.add_argument("--target", default=None, help="归档目录（默认 <repo>/skill/skillos/vendor/dist/）")
     args = ap.parse_args()
@@ -182,17 +191,47 @@ def main() -> None:
         return
 
     # --- 下载到临时目录，全部成功后才动归档区 ---
+    # 并发下载：artifact 走 302 → Azure 签名 CDN，**单连接常被限速**
+    # （实测同一批 390MB：单线程 51 KB/s ≈ 2 小时）。失败不落半套归档。
     tmp = Path(tempfile.mkdtemp(prefix="skillos-release-"))
     staged: dict[str, Path] = {}
     version: str | None = None
+    jobs = max(1, min(args.jobs, len(wanted)))
+    print(f"并发下载 {len(wanted)} 个 artifact（{jobs} 连接）…")
     try:
+        raws: dict[str, Path] = {}
+        t0 = time.monotonic()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
+            futs = {
+                pool.submit(
+                    api_download,
+                    f"{API}/repos/{args.repo}/actions/artifacts/{a['id']}/zip",
+                    token,
+                    tmp / f"{a['name']}.artifact.zip",
+                ): a
+                for a in wanted
+            }
+            errors: list[str] = []
+            for fut in concurrent.futures.as_completed(futs):
+                a = futs[fut]
+                try:
+                    fut.result()
+                except BaseException as e:  # die() 抛的是 SystemExit，一并收集
+                    errors.append(f"{a['name']}: {e}")
+                    continue
+                p = tmp / f"{a['name']}.artifact.zip"
+                raws[a["name"]] = p
+                print(f"  ✓ {a['name']:<20} {p.stat().st_size / 1048576:7.1f} MB"
+                      f"  ({time.monotonic() - t0:.0f}s)")
+            if errors:
+                die("下载失败：\n      " + "\n      ".join(errors))
+
+        # 解包（本地 IO，顺序做。平台 artifact 是两层结构，见 references/release.md）
         for a in wanted:
-            raw = tmp / f"{a['name']}.artifact.zip"
-            api_download(f"{API}/repos/{args.repo}/actions/artifacts/{a['id']}/zip", token, raw)
+            raw = raws[a["name"]]
             if a["name"] == WEB_ARTIFACT:
                 staged["web-dist.zip"] = raw
                 continue
-            # 平台 artifact：取内层交付 zip（两层结构，见 references/release.md）
             with zipfile.ZipFile(raw) as z:
                 members = [n for n in z.namelist() if DELIVERY_ZIP_RE.match(Path(n).name)]
                 if len(members) != 1:

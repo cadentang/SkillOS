@@ -61,10 +61,17 @@ curl -s "https://api.github.com/repos/cadentang/SkillOS/actions/runs/<run_id>/jo
 SKILLOS_GH_TOKEN=<token> python scripts/release_pull.py          # 最新成功 run
 SKILLOS_GH_TOKEN=<token> python scripts/release_pull.py --run <run_id>
 SKILLOS_GH_TOKEN=<token> python scripts/release_pull.py --list   # dry-run 只看清单
+SKILLOS_GH_TOKEN=<token> python scripts/release_pull.py --jobs 8 # 并发连接数（默认 5）
 ```
 
-脚本行为：下载 5 个 artifact → 从平台 artifact 的**两层结构**中只取内层交付 zip →
-清空 `skill/skillos/vendor/dist/` 旧内容 → 落新 → 写 `RELEASE-INFO.json`。
+脚本行为：**并发**下载 5 个 artifact（默认 5 连接）→ 从平台 artifact 的**两层结构**中
+只取内层交付 zip → 清空 `skill/skillos/vendor/dist/` 旧内容 → 落新 → 写 `RELEASE-INFO.json`。
+
+**为什么必须并发**：artifact 下载是 302 → Azure 签名 CDN，**单连接会被限速**。实测同一批
+390MB：单线程 51 KB/s（≈2 小时），5 并发聚合 700 KB/s（≈10 分钟）。慢的时候 `--jobs 8`。
+
+下载全程落系统临时目录（`%TEMP%/skillos-release-*`），**全部成功才动归档区** ——
+中途失败不会留下半套归档，也不会污染 `vendor/dist/`。
 
 ### 1.6 验证（三条全过才算完成）
 
@@ -107,3 +114,4 @@ SKILLOS_GH_TOKEN=<token> python scripts/release_pull.py
 | pip 直连超时 | 一律清华源 `-i https://pypi.tuna.tsinghua.edu.cn/simple` |
 | macOS runner 标签 | `macos-15`(arm64) / `macos-15-intel`(x64)；`macos-13` 已退役别用 |
 | 匿名访问 Actions | artifact 下载必须 token；job 列表与 annotations API 匿名可读 |
+| 单连接下载被 CDN 限速（390MB 要 2 小时） | `release_pull.py` 默认 5 并发（`--jobs 8` 更快）；进度看 `%TEMP%/skillos-release-*/`，**归档区在全部下完前不会变** |
