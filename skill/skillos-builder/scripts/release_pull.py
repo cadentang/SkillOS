@@ -42,14 +42,18 @@ import tempfile
 import time
 import urllib.request
 import zipfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 API = "https://api.github.com"
 WORKFLOW = "release.yml"
-PLATFORM_ARTIFACTS = {"skillos-win-x64", "skillos-mac-arm64", "skillos-mac-x64", "skillos-linux-x64"}
+PLATFORM_ARTIFACTS = {
+    "skillos-win-x64", "skillos-mac-arm64", "skillos-mac-x64", "skillos-linux-x64",
+}
 WEB_ARTIFACT = "web-dist"
-DELIVERY_ZIP_RE = re.compile(r"^skillos-(\d+\.\d+\.\d+)-(win-x64|mac-arm64|mac-x64|linux-x64)\.zip$")
+DELIVERY_ZIP_RE = re.compile(
+    r"^skillos-(\d+\.\d+\.\d+)-(win-x64|mac-arm64|mac-x64|linux-x64)\.zip$"
+)
 
 
 def default_target() -> Path:
@@ -58,7 +62,7 @@ def default_target() -> Path:
 
 
 def now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def write_json(path: Path, obj: dict) -> None:
@@ -66,7 +70,7 @@ def write_json(path: Path, obj: dict) -> None:
     path.write_text(json.dumps(obj, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def die(msg: str, code: int = 2) -> "None":
+def die(msg: str, code: int = 2) -> None:
     print(f"[release_pull] {msg}", file=sys.stderr)
     raise SystemExit(code)
 
@@ -77,8 +81,9 @@ def get_token(args: argparse.Namespace) -> str:
         tok = sys.stdin.readline().strip()
     if not tok:
         die(
-            "缺少 token。请生成 fine-grained token（仅 SkillOS 仓库、Permissions → Actions → Read-only、"
-            "7 天过期），然后 SKILLOS_GH_TOKEN=<token> 传入或 --token-stdin 管道传入。"
+            "缺少 token。请生成 fine-grained token（仅 SkillOS 仓库、"
+            "Permissions → Actions → Read-only、7 天过期），"
+            "然后 SKILLOS_GH_TOKEN=<token> 传入或 --token-stdin 管道传入。"
             "token 只在本次进程内使用，不落盘；用完建议吊销。",
         )
     return tok
@@ -160,14 +165,18 @@ def sha256_file(p: Path) -> str:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("--repo", default="cadentang/SkillOS")
-    ap.add_argument("--run", type=int, default=None, help="指定 run id；缺省取最新成功的 release run")
+    ap.add_argument("--run", type=int, default=None,
+                    help="指定 run id；缺省取最新成功的 release run")
     ap.add_argument("--list", action="store_true", help="只列出将拉取的 artifact，不下载")
     ap.add_argument("--jobs", type=int, default=5,
                     help="并发下载连接数（默认 5；单连接被 CDN 限速时调大更快，1 = 串行）")
     ap.add_argument("--token-stdin", action="store_true", help="从 stdin 第一行读 token")
-    ap.add_argument("--target", default=None, help="归档目录（默认 <repo>/skill/skillos/vendor/dist/）")
+    ap.add_argument("--target", default=None,
+                    help="归档目录（默认 <repo>/skill/skillos/vendor/dist/）")
     args = ap.parse_args()
 
     token = get_token(args)
@@ -177,9 +186,10 @@ def main() -> None:
     print(f"run {rid} | {branch} | commit {sha} | {run.get('created_at')}")
 
     arts = api_json(f"{API}/repos/{args.repo}/actions/runs/{rid}/artifacts?per_page=50", token)
-    wanted = [a for a in arts.get("artifacts", []) if a["name"] in PLATFORM_ARTIFACTS | {WEB_ARTIFACT}]
+    allowed = PLATFORM_ARTIFACTS | {WEB_ARTIFACT}
+    wanted = [a for a in arts.get("artifacts", []) if a["name"] in allowed]
     found = {a["name"] for a in wanted}
-    missing = (PLATFORM_ARTIFACTS | {WEB_ARTIFACT}) - found
+    missing = allowed - found
     if missing:
         die(f"run {rid} 缺 artifact：{sorted(missing)} —— 不做半套归档。")
     for a in wanted:
@@ -276,11 +286,12 @@ def main() -> None:
     print(f"\n=== 归档完成 → {out_dir}（仅最新 v{version}） ===")
     for name, meta in sorted(info["files"].items()):
         print(f"  {name:<36} {meta['bytes']:>12,}  sha256={meta['sha256'][:16]}…")
-    print("核验要点：RELEASE-INFO.json 的 head_sha 应等于 tag 指向的提交；sha256 可与 CI 侧 BUILD-INFO 交叉核对。")
+    print("核验要点：RELEASE-INFO.json 的 head_sha 应等于 tag 指向的提交；"
+          "sha256 可与 CI 侧 BUILD-INFO 交叉核对。")
 
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        raise SystemExit(130)
+        raise SystemExit(130) from None

@@ -44,7 +44,9 @@ def _read(p: Path) -> str:
 
 # ---------------------------------------------------------------- 结构类
 
-REQUIRED_SCRIPTS = ["detect.py", "bootstrap.py", "start.py", "status.py", "stop.py", "vendor_fetch.py"]
+REQUIRED_SCRIPTS = [
+    "detect.py", "bootstrap.py", "start.py", "status.py", "stop.py", "vendor_fetch.py",
+]
 REQUIRED_REFS = ["troubleshooting.md", "agent-config.md"]
 
 
@@ -137,26 +139,37 @@ def check_doc_impl_consistency(pkg: Path) -> None:
 
     # 2b) SKILL.md 引用到的所有文件必须真实存在（交付包里最容易漏的一项）
     #     注意分形态：runtime/、vendor/<平台>/、start.*、BUILD-INFO.json 是构建期注入，
-    #     只在发行包里要求；其余（SKILL.md/manifest/references/scripts/vendor 规约）两种形态都必须有。
-    DIST_ONLY = ("runtime/", "vendor/win-x64/", "vendor/mac-arm64/", "vendor/mac-x64/",
-                 "vendor/linux-x64/", "vendor/linux-arm64/", "start.cmd", "start.sh", "BUILD-INFO.json")
+    #     只在发行包里要求；其余（SKILL.md / manifest / references / scripts / vendor 规约）
+    #     两种形态都必须有。
+    DIST_ONLY = (
+        "runtime/", "vendor/win-x64/", "vendor/mac-arm64/", "vendor/mac-x64/",
+        "vendor/linux-x64/", "vendor/linux-arm64/", "start.cmd", "start.sh",
+        "BUILD-INFO.json",
+    )
     is_dist = (pkg / "BUILD-INFO.json").is_file()
-    ref_paths = sorted(set(re.findall(r"`((?:references|scripts|vendor|runtime)/[A-Za-z0-9_./-]+?)`", skill_txt)))
-    ref_paths += [p for p in ("manifest.json", "SKILL.md", "start.cmd", "start.sh") if f"`{p}`" in skill_txt]
+    ref_paths = sorted(set(re.findall(
+        r"`((?:references|scripts|vendor|runtime)/[A-Za-z0-9_./-]+?)`", skill_txt
+    )))
+    ref_paths += [
+        p for p in ("manifest.json", "SKILL.md", "start.cmd", "start.sh") if f"`{p}`" in skill_txt
+    ]
     absent = [p for p in ref_paths if not (pkg / p).exists()]
     must_have = [p for p in absent if not p.startswith(DIST_ONLY)]
     dist_only_absent = [p for p in absent if p.startswith(DIST_ONLY)]
     if must_have:
-        rec("fail", "DOC-IMPL", f"SKILL.md 引用了包内不存在的文件：{must_have} ⇒ 客户按文档找不到东西")
+        rec("fail", "DOC-IMPL",
+            f"SKILL.md 引用了包内不存在的文件：{must_have} ⇒ 客户按文档找不到东西")
     else:
         rec("ok", "DOC-IMPL", f"SKILL.md 引用的 {len(ref_paths)} 个包内路径全部存在")
     if dist_only_absent:
         lvl = "fail" if is_dist else "info"
-        rec(lvl, "DOC-IMPL", f"构建期注入项在{'发行包中缺失' if is_dist else '源码形态下正常缺失'}：{dist_only_absent}")
+        where = "发行包中缺失" if is_dist else "源码形态下正常缺失"
+        rec(lvl, "DOC-IMPL", f"构建期注入项在{where}：{dist_only_absent}")
 
     # 3) SKILL.md 承诺的命令行开关必须在脚本里真实存在
     script_text = "\n".join(_read(p) for p in scripts_dir.glob("*.py"))
-    promised = [f for f in FLAG_CANDIDATES if re.search(r"(?<![\w-])" + re.escape(f) + r"(?![\w-])", skill_txt)]
+    flag_pat = r"(?<![\w-])%s(?![\w-])"
+    promised = [f for f in FLAG_CANDIDATES if re.search(flag_pat % re.escape(f), skill_txt)]
     phantom = [f for f in promised if f not in script_text]
     if phantom:
         rec("fail", "DOC-IMPL", f"SKILL.md 写了但脚本未实现的参数：{phantom} ⇒ 客户照文档敲会报错")
@@ -248,7 +261,8 @@ def check_source_leak(pkg: Path) -> None:
         return
     py = list((pkg / "runtime").rglob("*.py"))
     if py:
-        rec("fail", "LEAK", f"runtime/ 下出现源码 .py（{len(py)} 个，客户可见）：{[str(p.relative_to(pkg)) for p in py[:3]]}")
+        shown = [str(p.relative_to(pkg)) for p in py[:3]]
+        rec("fail", "LEAK", f"runtime/ 下出现源码 .py（{len(py)} 个，客户可见）：{shown}")
     else:
         rec("ok", "LEAK", "runtime/ 下无 .py 源码泄漏")
 
@@ -262,7 +276,10 @@ SECRET_PATTERNS = [
     (r"\bAKIA[0-9A-Z]{16}\b", "AWS Access Key"),
     (r"-----BEGIN [A-Z ]*PRIVATE KEY-----", "私钥块"),
 ]
-TEXT_GLOBS = ["SKILL.md", "manifest.json", "README.md", "README.txt", "*.md", "scripts/*.py", "references/*.md"]
+TEXT_GLOBS = [
+    "SKILL.md", "manifest.json", "README.md", "README.txt",
+    "*.md", "scripts/*.py", "references/*.md",
+]
 
 
 def check_secrets(pkg: Path) -> None:
@@ -312,7 +329,8 @@ def check_project_conflicts(repo: Path, pkg: Path) -> None:
         if str(port) in docs:
             rec("ok", "CONFLICT", f"端口 {port} 与 docs/ 约定一致")
         else:
-            rec("fail", "CONFLICT", f"manifest 端口 {port} 在 docs/ 中查无（预期 9080）⇒ 文档与实现分裂")
+            rec("fail", "CONFLICT",
+                f"manifest 端口 {port} 在 docs/ 中查无（预期 9080）⇒ 文档与实现分裂")
 
     # 状态目录：~/.skillos 前缀
     sd = (man.get("paths") or {}).get("state_dir", "")
@@ -374,7 +392,8 @@ def check_release_archive(pkg: Path) -> None:
             have.add(m.group(1))
     missing = want - have
     if missing or "web-dist.zip" not in files:
-        rec("fail", "RELEASE", f"归档缺件：平台 {sorted(missing)}；web-dist={'ok' if 'web-dist.zip' in files else '缺'}")
+        web = "ok" if "web-dist.zip" in files else "缺"
+        rec("fail", "RELEASE", f"归档缺件：平台 {sorted(missing)}；web-dist={web}")
     else:
         rec("ok", "RELEASE", "四平台 + web 前端齐全")
 
@@ -396,7 +415,9 @@ def check_release_archive(pkg: Path) -> None:
             rec("warn", "RELEASE", f"{name} 读取失败：{e}")
             continue
         if info.get("head_sha", "")[:7] != str(bi.get("git_commit", ""))[:7]:
-            rec("fail", "RELEASE", f"{name}: BUILD-INFO.git_commit={bi.get('git_commit')} ≠ RELEASE-INFO.head_sha={info.get('head_sha')}")
+            rec("fail", "RELEASE",
+                f"{name}: BUILD-INFO.git_commit={bi.get('git_commit')}"
+                f" ≠ RELEASE-INFO.head_sha={info.get('head_sha')}")
         nk = str(bi.get("nuitka", ""))
         try:
             nkv = tuple(int(x) for x in nk.split(".")[:2])
@@ -407,7 +428,8 @@ def check_release_archive(pkg: Path) -> None:
         if not (bi.get("source_leak_check") or {}).get("clean"):
             rec("fail", "RELEASE", f"{name}: source_leak_check 非 clean")
         if nkv >= (4, 2):
-            rec("ok", "RELEASE", f"{name}: commit {bi.get('git_commit')} / nuitka {nk} / 无源码泄漏")
+            rec("ok", "RELEASE",
+                f"{name}: commit {bi.get('git_commit')} / nuitka {nk} / 无源码泄漏")
 
 
 # ------------------------------------------------- 归档 zip 内部审查
@@ -433,7 +455,9 @@ def audit_archive(zip_path: Path) -> None:
             rec("fail", "ARCHIVE", f"{zip_path.name} 内无 BUILD-INFO.json ⇒ 无法核验来源")
         else:
             data = json.loads(z.read(bi))
-            rec("ok", "ARCHIVE", f"{zip_path.name}: commit {data.get('git_commit')} / nuitka {data.get('nuitka')} / platform {data.get('platform')}")
+            rec("ok", "ARCHIVE",
+                f"{zip_path.name}: commit {data.get('git_commit')} / nuitka {data.get('nuitka')}"
+                f" / platform {data.get('platform')}")
             exes = list((data.get("executables") or {}).keys())
             if not exes:
                 rec("fail", "ARCHIVE", f"{zip_path.name}: BUILD-INFO 未登记可执行文件")
@@ -443,7 +467,8 @@ def audit_archive(zip_path: Path) -> None:
                     rec("fail", "ARCHIVE", f"{zip_path.name}: 登记的 {exes} 在包内找不到实物")
                 else:
                     rec("ok", "ARCHIVE", f"{zip_path.name}: 可执行实物在包（{exes[0]}）")
-        if root and root.rstrip("/") != "skillos-" + (zip_path.name.split("-", 2)[-1].removesuffix(".zip")):
+        expect_root = "skillos-" + zip_path.name.split("-", 2)[-1].removesuffix(".zip")
+        if root and root.rstrip("/") != expect_root:
             rec("info", "ARCHIVE", f"{zip_path.name}: 顶层目录 {root.rstrip('/')}（解压即得包根）")
         txt = z.read(skill_md).decode("utf-8", "replace")
         for pat, label in SECRET_PATTERNS:
@@ -454,9 +479,12 @@ def audit_archive(zip_path: Path) -> None:
 # ------------------------------------------------- 主流程
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     here = Path(__file__).resolve().parent.parent          # skillos-builder/
-    ap.add_argument("--package", default=str(here.parent / "skillos"), help="包根（默认同级 skillos/）")
+    ap.add_argument("--package", default=str(here.parent / "skillos"),
+                    help="包根（默认同级 skillos/）")
     ap.add_argument("--archive", default=None, help="直接审交付 zip")
     ap.add_argument("--repo", default=str(here.parent.parent), help="仓库根（查 docs/pyproject）")
     ap.add_argument("--skip-release", action="store_true")
@@ -510,4 +538,4 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        raise SystemExit(130)
+        raise SystemExit(130) from None
