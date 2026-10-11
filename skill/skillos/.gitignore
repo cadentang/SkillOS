@@ -9,6 +9,9 @@ vendor/linux-x64/
 vendor/linux-arm64/
 vendor/wheel/
 
+# skillos-builder 拉回的发行产物归档（体积大、只留最新；见 skill/skillos-builder）
+vendor/dist/
+
 # 构建期生成的零安装入口与清单
 start.cmd
 start.sh
