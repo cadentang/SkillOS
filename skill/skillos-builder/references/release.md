@@ -6,6 +6,9 @@
 ## 0. 全景
 
 ```
+① 版本一致性核对（本地 HEAD / origin/main / 待发 tag / 已有归档）  ← 不齐不开工
+        │ 不一致 → AskUserQuestion 让用户选：拉取 / 覆盖 / 换号 / 中止
+        ▼
 git tag vX.Y.Z && git push origin vX.Y.Z      ← 沙箱外跑
         │ 触发 release.yml（四平台矩阵 + web）
         ▼  约 3-6 分钟
@@ -19,12 +22,54 @@ skill/skillos/vendor/dist/                    ← 最终归档位（gitignored�
 
 ## 1. 创建 SKILLOS（新版本全流程）
 
-### 1.1 前置自证
+### 1.0 版本一致性核对（必做，不一致必须让用户拍板）
+
+**首选一条命令**（只读，不会替你 pull / rebase / push -f / 换号；block 即退出码 1）：
+
+```bash
+python scripts/check_sync.py --tag vX.Y.Z   # 默认先 fetch
+python scripts/check_sync.py --no-fetch     # 沙箱内/离线（refs 可能过期）
+python scripts/check_sync.py --json         # 机器可读
+```
+
+有 `SKILLOS_GH_TOKEN` 时会顺带查远程最新成功 run 与归档比对；`--tag` 省略则跳过版本号维度。
+
+**手动核对**（兜底口径，SSH 命令沙箱外跑）：
 
 ```bash
 cd <SkillOS 仓库根>
-git status --porcelain          # 必须干净
+git fetch origin --tags --prune        # 只读
+git status --porcelain                 # 空 = 工作区干净
+git rev-parse --short HEAD             # 本地 HEAD
+git rev-parse --short origin/main      # 远程主干
+git log --oneline origin/main..HEAD    # 本地领先（= 本次要发的改动）
+git log --oneline HEAD..origin/main    # 本地落后（= 远程有新提交）
+git tag --list 'v*' --sort=-v:refname | head -5
+git ls-remote --tags origin            # 远程真实 tag，别信本地缓存
+```
+
+| 情形 | 判据 | 处理 |
+|---|---|---|
+| 完全对齐 | 工作区空 + 领先/落后两区间都空 | 继续 1.1 |
+| 本地领先 | `origin/main..HEAD` 非空、`HEAD..origin/main` 空 | 正常，1.2 推送即可；向用户报「领先 N 个提交」 |
+| 本地落后 | `HEAD..origin/main` 非空 | **停**：基于旧代码发版 = 产物落后 |
+| 分叉 | 两区间都非空 | **停**：先决定 merge / rebase / 放弃本地 |
+| 工作区脏 | `git status --porcelain` 非空 | **停**：确认哪些提交、哪些丢弃 |
+
+版本号另查两件事：**待发 tag 远程已存在**（`git ls-remote --tags origin vX.Y.Z` 有输出）→ 覆盖还是换号？
+**待发版本号低于远程最高 tag** → 这是回退，必须用户确认意图。
+
+归档另查一件事：`vendor/dist/RELEASE-INFO.json` 的 `head_sha` 若**不在远程历史里**（来自未推送的
+本地提交）→ 历史产物与远程代码不符，**停下报告**；仅落后于远程最新 run 则重拉即可，不阻塞。
+
+**不一致时的四个标准选项**（AskUserQuestion，不得自行 pull / rebase / push -f / 换号）：
+① 拉取远程后重来（`git pull --ff-only`） ② 推送本地覆盖远程 ③ 换新版本号重发 ④ 中止，用户自己处理
+
+### 1.1 前置自证
+
+```bash
 ruff check skillos tests        # CI 同款 lint
+git status --porcelain          # 提交前复确认干净
 ```
 
 ### 1.2 提交推送（push 在沙箱外）
@@ -89,11 +134,15 @@ SKILLOS_GH_TOKEN=<token> python scripts/release_pull.py --jobs 8 # 并发连接�
 
 ## 2. 更新 SKILLOS（只刷新归档）
 
+**先做 §1.0 的「归档维度」核对**（`RELEASE-INFO.json` 的 `head_sha` / `run_id` vs 远程最新成功 run）：
+归档来自未推送的本地提交 → 停下报告；只是落后 → 直接重拉。
+
 ```bash
 SKILLOS_GH_TOKEN=<token> python scripts/release_pull.py
 ```
 
 自动取最新成功 run；`vendor/dist/` 只留最新。若用户指名某次 run，加 `--run <id>`。
+拉完仍要过 §1.6 验证 + 交付前审查（`audit_skillos.py`）。
 
 ## 3. token 安全约定（不可违）
 
@@ -115,3 +164,5 @@ SKILLOS_GH_TOKEN=<token> python scripts/release_pull.py
 | macOS runner 标签 | `macos-15`(arm64) / `macos-15-intel`(x64)；`macos-13` 已退役别用 |
 | 匿名访问 Actions | artifact 下载必须 token；job 列表与 annotations API 匿名可读 |
 | 单连接下载被 CDN 限速（390MB 要 2 小时） | `release_pull.py` 默认 5 并发（`--jobs 8` 更快）；进度看 `%TEMP%/skillos-release-*/`，**归档区在全部下完前不会变** |
+| 远程有本地不知道的提交，照旧基于旧代码发版 | §1.0 `git fetch` + 区间比对；落后/分叉一律停下问用户 |
+| 待发 tag 已被占用 / 低于远程最高 tag（回退） | §1.0 `git ls-remote --tags origin`；停下问「覆盖还是换号」 |
