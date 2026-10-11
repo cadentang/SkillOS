@@ -107,6 +107,16 @@ token 只在命令里临时用，**不写入任何项目文件、不落盘**。
 **产物落位**：解压到 `build/dist/`（gitignored），得到 `build/dist/skillos-<平台>/`，
 根目录即 skill 包（`SKILL.md` 在根）。Windows 机器装 win-x64 那份即可。
 
+> ⚠️ **两个解压陷阱（实战踩过）**：
+> ① artifact zip 内部是**两层结构**：`skillos-0.1.0-<平台>.zip`（交付 zip）+ `skillos-<平台>/`（解包目录）——
+>    解压后把内层目录上提一层再落位；
+> ② 若 `build/dist/skillos-<平台>/` 已有**本地旧构建**，解压会直接**合并污染**（不会报错！）——
+>    先 `mv` 挪走旧目录再解压（别用 `rm -rf` 大目录）。
+>
+> 解压后用 `BUILD-INFO.json` 验来源：`git_commit` 应等于本次 tag 指向的提交、`nuitka` 符合锁定版本、
+> `source_leak_check.clean == true`、`executables` 的文件名符合平台命名（win `cp311-win_amd64.pyd` /
+> mac `cpython-311-darwin.so` / linux `cpython-311-x86_64-linux-gnu.so`）。
+
 ---
 
 ## 5. 踩坑清单（血泪，勿重蹈）
