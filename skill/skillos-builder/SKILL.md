@@ -15,7 +15,7 @@ agent_created: true
 | 用户说 | 含义 | 走哪条流程 |
 |---|---|---|
 | **创建SKILLOS** | 首版，或代码有改动要出**新版本号** | 流程 A（7 步全流程） |
-| **更新SKILLOS** | 代码没大改，只要**最新产物**（或重跑某版本） | 流程 A 的 1→4→5，或直接流程 B |
+| **更新SKILLOS** | 代码没大改，只要**最新产物**（或重跑某版本） | 流程 B 拉产物 → **第 6 步交付前审查必跑** |
 
 **先问一句再动手**：如果用户没说版本号，确认「沿用 v0.1.x 还是发新版本号？」——
 新版本号要走流程 A 全程（打新 tag 触发 CI）；沿用旧版本直接走流程 B 拉最新成功 run。
@@ -66,14 +66,30 @@ SKILLOS_GH_TOKEN=xxx python scripts/release_pull.py --run <run_id>             #
 SKILLOS_GH_TOKEN=xxx python scripts/release_pull.py --list                     # 先看清单不下载
 ```
 
-**第 6 步 · 验证**（不全不算完成）
-- `skill/skillos/vendor/dist/RELEASE-INFO.json`：`head_sha` == tag 指向的提交、`version` == tag 去掉 v
-- 4 个交付 zip + web-dist.zip 齐、sha256 在案
-- 任一交付 zip 内 `BUILD-INFO.json`：`git_commit` 一致、`nuitka` 符合锁定版本、`source_leak_check.clean == true`
+**第 6 步 · 交付前审查（必跑，不过不交付）**
+
+skillos 最终要交给客户，所以产物必须过审——审查两件事：**产品包流程自洽**（SKILL.md 描述 ↔
+脚本实现 ↔ manifest ↔ 实物产物）与**与项目约定不冲突**（端口 / ABI / 路径 / 依赖上限 / 红线）。
+
+```bash
+python scripts/audit_skillos.py                                  # 源码包 + vendor/dist 归档（默认）
+python scripts/audit_skillos.py --archive <交付 zip>              # 直接审交付 zip 内部
+python scripts/audit_skillos.py --package <解包目录> --skip-release  # 审发行包实物形态
+```
+
+覆盖面（26 项）：结构完整性 / SKILL.md 引用的脚本与路径是否真实存在 / 文档承诺的命令行参数
+是否真被实现 / 孤儿脚本 / 形态判定（源码 vs frozen）与 ABI 命名 / 零安装件（start.* + 便携
+CPython + runtime/web）/ runtime 下无 .py 泄漏 / 凭据扫描 / 与 docs 的端口·state_dir·ABI 锚点
+对比 / 依赖封顶 / 归档 sha256 + 与 BUILD-INFO 的 commit·nuitka 版本交叉核对。
+
+**脚本覆盖不了的语义项**（描述是否覆盖全部触发场景、客户话术、红线一致性）照
+`references/audit-checklist.md` 人工过一遍。
+
+> 审查出现 **fail 一律不得交付**；修复要走流程 A 出新版本，禁止「先交付后修」。
 
 **第 7 步 · 冒烟 + 汇报**
 - 本机是 Windows：用仓库 `build/smoke.py --dist <解包后的 win 产物>` 跑四重自证（42 项断言）
-- 汇报：版本 / run 链接 / 各平台产物大小 / vendor/dist 落位 / 冒烟结果
+- 汇报：版本 / run 链接 / 各平台产物大小 / vendor/dist 落位 / **审查结论（含 warn 与决策项）** / 冒烟结果
 - **提醒用户吊销刚才的 token**（它在对话里出现过）
 
 ## 流程 B · 更新（只刷新产物归档）
@@ -98,13 +114,15 @@ skill/skillos/vendor/
     └── RELEASE-INFO.json               # 版本/run/commit/sha256 台账
 ```
 
-## 四条铁律
+## 五条铁律
 
 1. **token 不落盘**：只走环境变量/stdin；不写进任何文件、命令历史、日志；用完提醒吊销。
 2. **CI 没全绿不拉产物**；拉完不验 BUILD-INFO 不算完成。
 3. **vendor/dist 只留最新**：`release_pull.py` 拉取前自动清旧——不许手动攒多版本。
 4. **不污染 `skill/skillos/` 产品定义**：本 skill 的一切改动只进 `skillos-builder/` 和
    `skill/skillos/vendor/dist/`（gitignored）；不改对方的 SKILL.md / scripts / manifest。
+5. **审查不过不交付**：`audit_skillos.py` 出 fail 必须修掉、走流程 A 出新版本；
+   warn 与决策项（如内置演示凭据）要在汇报里向用户点名，不静默放过。
 
 ## 踩坑速查（详情见仓库 build/CI-RELEASE.md）
 
@@ -120,5 +138,7 @@ skill/skillos/vendor/
 ## 引用资源
 
 - `references/release.md` —— 操作视角的完整手册（含 API 命令原文）
+- `references/audit-checklist.md` —— 交付前人工复核清单（脚本查不了的语义项）
 - `scripts/release_pull.py` —— 拉产物归位（纯标准库；`--list` dry-run）
+- `scripts/audit_skillos.py` —— 交付前审查（只读；源码包 / 发行包 / 交付 zip 三种入口）
 - 仓库 `build/CI-RELEASE.md` —— 打包侧 10 条踩坑全记录
