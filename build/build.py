@@ -787,6 +787,31 @@ def _copy_web(spec: dict, root: Path) -> None:
             f"      → web/vite.config.ts 必须 build.sourcemap=false（见 docs/10 §5）。")
 
 
+def _copy_vendor_docs(spec: dict, root: Path) -> None:
+    """把 vendor/ 的**规约文件**带进发行包（README.md / manifest.json）。
+
+    为什么需要单独一步：`_copy_skill_pack` 会把整棵 `vendor/` 清掉（仓库里那份
+    是占位/上次残留），随后 `bundle_portable_python` 只补回 `vendor/<平台>/` 里的
+    运行时实物 —— 于是「这些运行时从哪来、许可是什么、离线机器怎么预置」的说明书
+    就一起丢了。而产品的 SKILL.md「引用资源」明确承诺了 `vendor/README.md`。
+    客户拿到包会出现：文档指的文件不存在，且第三方运行时的**来源与许可说明缺失**。
+
+    只拷**文件**（规约件）；`vendor/dist/` 之类的目录是归档区，不随包。
+    """
+    src = REPO / spec["assemble"]["skill_src"] / "vendor"
+    if not src.is_dir():
+        return
+    dst = root / "vendor"
+    copied: list[str] = []
+    for f in sorted(src.iterdir()):
+        if f.is_file():
+            dst.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(f, dst / f.name)
+            copied.append(f.name)
+    if copied:
+        log(f"  ✓ vendor 规约文件 → vendor/（{', '.join(copied)}）")
+
+
 def _copy_skill_pack(spec: dict, root: Path) -> Path:
     """把仓库里的 skill 包（源码形态）拷成**发行包骨架**，返回包根。
 
@@ -1040,6 +1065,7 @@ def assemble_module(spec: dict, pk: str, pyd: Path, dry: bool,
         mf = root / "manifest.json"
         generate_launcher_manifest(mf, mf, spec, pk, dry)
         write_entry_scripts(spec, root, pk, vendored)
+        _copy_vendor_docs(spec, root)   # vendor 的规约文件（说明书）也要随包
 
     # 6) 附加文档（规格里显式列出的才随包）
     for extra in spec["assemble"].get("extra_docs", []):
@@ -1091,6 +1117,7 @@ def assemble_standalone(spec: dict, pk: str, built: dict[str, Path],
         _copy_web(spec, root)
         mf = root / "manifest.json"
         generate_launcher_manifest(mf, mf, spec, pk, dry)
+        _copy_vendor_docs(spec, root)   # 与 frozen 路线保持一致
     for extra in asm.get("extra_docs", []):
         p = REPO / extra
         if p.is_file() and not dry:
