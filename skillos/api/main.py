@@ -47,16 +47,51 @@ from skillos.core.logging import (
     reset_op_context,
     setup_logging,
 )
+from skillos.services.engine import resolve_home
 from skillos.store.cloud_repo import CloudRepo
 from skillos.store.db import init_schema, make_engine, make_session_factory
 
 log = get_logger("skillos.api")
 
 
+def _harden_secret_file(path) -> None:
+    """POSIX 下收紧权限到 0600；Windows 家目录本身按用户 ACL 隔离。"""
+    try:
+        os.chmod(path, 0o600)
+    except OSError:  # Windows 上 chmod 仅切换只读位，失败无安全影响
+        pass
+
+
+def _dev_jwt_secret() -> tuple[str, bool]:
+    """开发态 JWT secret（env 未设时）：`<home>/.skillos/jwt_secret` 持久化。
+
+    首启生成并写入，此后每次启动复用 —— 进程重启后已签发 token 不再失效。
+    home 走 resolve_home()（T1）：沙盒下 SKILLOS_ROOT 指向容器内目录，
+    secret 与该环境的库、日志落在同一边界内。
+    写入失败（只读 FS 等）→ 退回进程随机值：只回到"重启失效"，
+    不为密钥持久化阻塞服务启动。
+    """
+    path = resolve_home() / ".skillos" / "jwt_secret"
+    try:
+        if path.is_file():
+            existing = path.read_text(encoding="utf-8").strip()
+            if existing:
+                return existing, True
+        path.parent.mkdir(parents=True, exist_ok=True)
+        secret = secrets.token_urlsafe(32)
+        path.write_text(secret + "\n", encoding="utf-8")
+        _harden_secret_file(path)
+        return secret, True
+    except OSError:
+        return secrets.token_urlsafe(32), False
+
+
 def create_app(db_url: str | None = None, jwt_secret: str | None = None,
                sandbox: bool | None = None) -> FastAPI:
-    """构建应用。缺省从环境取 DB URL 与 JWT secret；开发态自动生成（重启失效）。
+    """构建应用。缺省从环境取 DB URL 与 JWT secret。
 
+    JWT secret 优先级：入参 > SKILLOS_JWT_SECRET > ~/.skillos/jwt_secret
+    （首启生成持久化，重启复用）；持久化失败才退回进程随机值。
     sandbox：沙盒模式标志（SKILLOS_SANDBOX=1），None = 按环境判定。
     沙盒模式下 health 暴露该标志（前端演示横幅）并挂载 reset 路由（FR-3.10）。
     """
@@ -69,11 +104,19 @@ def create_app(db_url: str | None = None, jwt_secret: str | None = None,
     )
     jwt_secret = jwt_secret or os.environ.get("SKILLOS_JWT_SECRET")
     if jwt_secret is None:
-        jwt_secret = secrets.token_urlsafe(32)
-        log.warning(
-            "jwt_secret_missing",
-            detail="使用进程随机值，重启后所有 token 失效",
-        )
+        # 开发态兜底：首启生成并持久化（见 _dev_jwt_secret），此后复用。
+        # 只有持久化也失败时才退回进程随机值（重启失效）。
+        jwt_secret, persisted = _dev_jwt_secret()
+        if persisted:
+            log.info(
+                "jwt_secret_dev_ready",
+                detail="env 未设 SKILLOS_JWT_SECRET，使用 ~/.skillos/jwt_secret 持久值",
+            )
+        else:
+            log.warning(
+                "jwt_secret_missing",
+                detail="secret 持久化失败，使用进程随机值，重启后所有 token 失效",
+            )
     if sandbox is None:
         sandbox = os.environ.get("SKILLOS_SANDBOX") == "1"
 
