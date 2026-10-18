@@ -144,3 +144,46 @@ jobs:
           path: build/out/**/*.report.xml
           retention-days: 7
           if-no-files-found: ignore
+
+  # ---------------------------------------------------------------- 发布
+  # 为什么必须发布到 Release（而不是只留 artifact）：
+  #   * artifact 下载**强制要 token**，公开仓库也一样（401），拉产物因此永远卡在
+  #     "等人给一个 fine-grained token" 上；
+  #   * Release assets 对公开仓库**匿名可下载**，且不随 14 天 artifact 保留期过期。
+  # 用 workflow 内置的 GITHUB_TOKEN，不需要任何人工 secret。
+  publish:
+    name: Publish release assets
+    needs: [web, compile]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect assets
+        run: |
+          mkdir -p release
+          # 编译 job 上传的是「目录 + 交付 zip」，download-artifact 会保留路径层级，
+          # 这里平铺到 release/ 下（不同平台 zip 名不冲突）。
+          find artifacts -name '*.zip' -type f -print -exec cp -n {} release/ \;
+          # web-dist 是目录形态 artifact，单独打包
+          if [ -d artifacts/web-dist ] && [ ! -f release/web-dist.zip ]; then
+            (cd artifacts/web-dist && zip -qr "$GITHUB_WORKSPACE/release/web-dist.zip" .)
+          fi
+          ls -lh release
+          test -f release/web-dist.zip
+
+      - name: Publish to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ github.ref_name }}"
+          gh release view "$TAG" >/dev/null 2>&1 || \
+            gh release create "$TAG" --title "SkillOS $TAG" \
+              --notes "SkillOS $TAG 编译发行包：win-x64 / linux-x64 / mac-arm64 / mac-x64，外加 web 前端产物 web-dist.zip。"
+          gh release upload "$TAG" release/*.zip --clobber
+          gh release view "$TAG" --json assets --jq '.assets[] | "\(.name)  \(.size)"'
