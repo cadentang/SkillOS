@@ -47,6 +47,8 @@ export function useDaemonStatus(): DaemonStatus {
     let ws: WebSocket | null = null;
     let closed = false;
     let retry: number | undefined;
+    // 见下方 daemon_status handler：只在「见过离线后重新上线」时失效一次
+    let sawOffline = false;
 
     const connect = () => {
       ws = new WebSocket(url);
@@ -58,9 +60,23 @@ export function useDaemonStatus(): DaemonStatus {
             op?: string;
           };
           if (msg.type === "daemon_status") {
+            const conn = !!msg.connected;
+            // daemon 重新上线（见过离线）→ 立即失效离线窗口期失败的读查询
+            // （recent-sync / logs 的 30s / 5s 轮询等不起，否则错误态滞留
+            // 到下个轮询周期，用户看到「记录读取失败」但徽标已绿）。
+            // 安全性：daemon_status 不来自 daemon 任务，重取 logs 只产生一条
+            // task_done(op=logs)，logs 不在 WRITE_OPS → 不再触发失效，
+            // 无自激（区别于 task_done 无差别失效，见上方 WRITE_OPS 注释）。
+            if (!conn) {
+              sawOffline = true;
+            } else if (sawOffline) {
+              sawOffline = false;
+              void queryClient.invalidateQueries({ queryKey: ["recent-sync"] });
+              void queryClient.invalidateQueries({ queryKey: ["logs"] });
+            }
             setStatus({
-              connected: !!msg.connected,
-              lastSeen: msg.connected ? new Date().toLocaleTimeString() : null,
+              connected: conn,
+              lastSeen: conn ? new Date().toLocaleTimeString() : null,
             });
           } else if (msg.type === "drift_changed") {
             // 数据变更权威信号：无条件失效（04 §2.7.3）

@@ -208,6 +208,9 @@ async def skillos_sync_push(slug: str, targets: list[str] | None = None,
 
     门禁 error 时返回 GATE_FAILED 与规则明细（FR-1.3.6：无绕过开关）。
     无 on_conflict / force 参数（FR-1.3.5）：冲突与删除确认走 Web 人工路径。
+
+    返回的每个 target 含三态判据：`action`（skip / write）+ `wrote` + `would_write`。
+    dry_run=true 时 wrote 恒为 false，**不能据此判断"无需同步"**。
     """
     return await _threaded(lambda: _push_impl(slug, targets, dry_run))
 
@@ -237,7 +240,18 @@ def _push_impl(slug: str, targets: list[str] | None, dry_run: bool) -> dict:
     outcomes = []
     held_back: list[str] = []
     for o in report.outcomes:
-        item = {"runtime": o.runtime_key, "ok": o.ok, "wrote": o.wrote}
+        # action + wrote 两字段是 Agent 唯一能分清三态的依据（2026-10-17 修复）：
+        #   action=skip                → 已是最新
+        #   action=write & !wrote      → dry_run 预览：真跑会写这么多
+        #   action=write & wrote       → 已落盘
+        # 只给 wrote 时，dry_run（默认值）永远 False，Agent 会误以为「无需同步」。
+        item = {
+            "runtime": o.runtime_key,
+            "ok": o.ok,
+            "wrote": o.wrote,
+            "action": o.action,
+            "would_write": o.action == "write",
+        }
         if o.error_code:
             item["error"] = {"code": o.error_code, "message": o.detail or ""}
             item["held_back_removals"] = list(o.held_back_removals or [])

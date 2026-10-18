@@ -86,11 +86,23 @@ class TargetRequest:
 
 @dataclass(frozen=True)
 class TargetOutcome:
-    """单目标结论。ok=True 且 wrote=False 是幂等跳过；ok=False 是拒绝/失败。"""
+    """单目标结论。
+
+    `wrote` 只说明「本次是否真的写了盘」，单看它无法区分「已是最新」和
+    「dry-run 预览到要写」——两者都是 wrote=False，但给用户的结论完全相反
+    （2026-10-17 实测：全新 skill 四端皆空，dry-run 却报"已是最新"）。
+    故用 `action` 承载前置判定的结论（与 `_Plan.action` 同源，FR-1.3.7
+    要求 dry_run 与真跑共用判据）：
+
+    - ``skip``  → 磁盘已是最新，真跑也不会写
+    - ``write`` → 需要写；配合 wrote 区分「将写（dry-run）」与「已写」
+    - 失败时 action 为判定结果（conflict / held_back / io），ok=False
+    """
 
     runtime_key: str
     ok: bool
     wrote: bool
+    action: str = "write"
     error_code: str | None = None
     held_back_removals: list[str] = field(default_factory=list)
     skipped_assets: list[str] = field(default_factory=list)  # 未纳管资产明细（FR-1.0.20）
@@ -228,6 +240,7 @@ def _outcome(plan: _Plan, *, ok: bool, wrote: bool, error_code: str | None = Non
         runtime_key=plan.req.adapter.key,
         ok=ok,
         wrote=wrote,
+        action=plan.action,
         error_code=error_code,
         held_back_removals=list(plan.removals) if plan.action == "held_back" else [],
         skipped_assets=list(plan.untracked),
@@ -385,6 +398,7 @@ def distribute_skill(
                 runtime_key=o.runtime_key,
                 ok=False,
                 wrote=False,
+                action="rejected",
                 error_code="PARTIAL_REJECT",
                 held_back_removals=o.held_back_removals,
                 skipped_assets=o.skipped_assets,
@@ -419,6 +433,7 @@ def distribute_skill(
             rolled.append(
                 TargetOutcome(
                     runtime_key=o.runtime_key, ok=False, wrote=False,
+                    action="rejected",
                     error_code="PARTIAL_REJECT",
                     skipped_assets=o.skipped_assets,
                     detail="另一目标写失败，整体回滚（FR-1.0.28）",

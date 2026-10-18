@@ -221,6 +221,7 @@ class TaskExecutor:
                     str(params.get("slug") or ""),
                     str(params.get("runtime") or ""),
                     dry_run=bool(params.get("dry_run", True)),
+                    by="daemon",
                 )
             except ValueError as e:
                 return {"ok": False, "error": {"code": "INVALID_INPUT", "message": str(e)}}

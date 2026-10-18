@@ -208,14 +208,34 @@ def _log_path(home: Path, mode: LogMode) -> Path:
     return home / ".skillos" / "logs" / f"{mode}.log"
 
 
+_console_renderer = structlog.dev.ConsoleRenderer(colors=False)
+
+# CLI 输出里没有意义的跨进程追踪字段（单进程、单命令；op_id 由 --json 单独给出）
+_CLI_HIDDEN_KEYS = ("pid", "tid", "op_id")
+
+
+def _cli_console_renderer(
+    logger: Any, name: str, event_dict: MutableMapping[str, Any]
+) -> str:
+    """CLI 模式的日志渲染：级别 + 事件 + 业务字段，去掉 pid/tid/op_id。
+
+    2026-10-17 修复：CLI 的 stderr 与 console.print 的输出在终端里交错显示，
+    带上 pid/tid/op_id 的一长串 key=value 会读成"报错堆栈混进人话"。
+    这几个字段只在跨进程排障时有用，CLI 场景下是纯噪声。
+    """
+    for k in _CLI_HIDDEN_KEYS:
+        event_dict.pop(k, None)
+    return _console_renderer(logger, name, event_dict)
+
+
 def _build_formatter(*, human: bool) -> logging.Formatter:
     """构造 stdlib Formatter —— 走 ProcessorFormatter 桥接 structlog event。
     human=True 时输出 key=value（CLI 调试用）；False 时输出 JSON。
     """
     if human:
-        # CLI 模式：人眼友好（key=value，单行）
+        # CLI 模式：人眼友好（key=value，单行，无 pid/tid）
         return ProcessorFormatter(
-            processor=structlog.dev.ConsoleRenderer(colors=False),
+            processor=_cli_console_renderer,
             foreign_pre_chain=[
                 merge_contextvars,
                 structlog.stdlib.add_log_level,

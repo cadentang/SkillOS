@@ -13,6 +13,7 @@ CLI / daemon / MCP 三个入口共用这一层（分层红线：入口 → servi
 
 from __future__ import annotations
 
+import difflib
 import hashlib
 import json
 import os
@@ -92,6 +93,44 @@ _SEVERITY: dict[DriftState, int] = {
 def all_adapters() -> list[RuntimeAdapter]:
     """四个内置 Runtime 适配器（新增 Runtime 只加数据，T12）。"""
     return [ClaudeAdapter(), AgentsAdapter(), WorkBuddyAdapter(), CodexAdapter()]
+
+
+def _is_binary(content: bytes | None) -> bool:
+    """NUL 字节探测（与 git 一致的粗判据；只扫前 8KB）。"""
+    return content is not None and b"\x00" in content[:8192]
+
+
+def _under_any(target: Path, roots: list[str]) -> bool:
+    """target 是否等于某个 root，或位于其下（`skillos import <path>` 的过滤判据）。"""
+    t = Path(target).resolve()
+    for r in roots:
+        try:
+            rp = Path(r).expanduser().resolve()
+        except (OSError, RuntimeError):  # 坏路径（不存在的盘符等）直接跳过
+            continue
+        if t == rp or t.is_relative_to(rp):
+            return True
+    return False
+
+
+def _unified_diff(a: dict[str, bytes], b: dict[str, bytes], *,
+                  from_label: str, to_label: str) -> str:
+    """两个 {相对路径: 字节} 映射的 unified diff；二进制只报"已变更"（T5 口径）。"""
+    chunks: list[str] = []
+    for path in sorted(set(a) | set(b)):
+        ca, cb = a.get(path), b.get(path)
+        if ca == cb:
+            continue
+        fa = f"{from_label}/{path}" if ca is not None else "/dev/null"
+        fb = f"{to_label}/{path}" if cb is not None else "/dev/null"
+        if _is_binary(ca) or _is_binary(cb):
+            chunks.append(f"--- {fa}\n+++ {fb}\n@@ 二进制文件已变更 @@\n")
+            continue
+        la = (ca or b"").decode("utf-8", errors="replace").splitlines(keepends=True)
+        lb = (cb or b"").decode("utf-8", errors="replace").splitlines(keepends=True)
+        for line in difflib.unified_diff(la, lb, fromfile=fa, tofile=fb):
+            chunks.append(line if line.endswith("\n") else line + "\n")
+    return "".join(chunks)
 
 
 @dataclass(frozen=True)
@@ -311,13 +350,28 @@ class LocalEngine:
             ))
         return known
 
-    def import_skills(self, runtimes: list[str] | None = None) -> ImportPlan:
-        """纳管（04 §2.2.5）。canonical = 主副本字节级拷贝（不归一化）；不自动 push。"""
+    def import_skills(self, runtimes: list[str] | None = None,
+                      paths: list[str] | None = None) -> ImportPlan:
+        """纳管（04 §2.2.5）。canonical = 主副本字节级拷贝（不归一化）；不自动 push。
+
+        paths 非空时只纳管这些目录下的 skill（`skillos import <path...>`，
+        04 §2.5.1）；判定用「扫描根 + rel_path 是否落在给定目录内」，
+        因此可以传单个 skill 目录，也可以传它的父目录。
+        """
         log.info(
             "import_started",
-            runtimes=runtimes,
+            runtimes=runtimes, paths=paths,
         )
-        scanned = [s for s in self.scan_all() if runtimes is None or s.runtime_key in runtimes]
+        scanned = [
+            s for s in self.scan_all()
+            if (runtimes is None or s.runtime_key in runtimes)
+            and (paths is None or _under_any(s.root / s.rel_path, paths))
+        ]
+        if paths is not None and not scanned:
+            raise ValueError(
+                f"指定路径下没有发现可纳管的 Skill: {', '.join(paths)}"
+                "（目录需含 SKILL.md，且在已配置的 Runtime 扫描根内）"
+            )
         log.info(
             "scan_completed",
             found_count=len(scanned),
@@ -557,7 +611,8 @@ class LocalEngine:
                 return DistributeReport(
                     ok=False,
                     outcomes=[TargetOutcome(
-                        runtime_key="*", ok=False, wrote=False, error_code="GATE_FAILED",
+                        runtime_key="*", ok=False, wrote=False, action="rejected",
+                        error_code="GATE_FAILED",
                         detail="; ".join(
                             f"{f.rule}: {f.message}"
                             for f in gate.findings if f.level == "error"
@@ -1213,7 +1268,40 @@ class LocalEngine:
         return {"ok": True, "name": name}
 
     # ------------------------------------------------ 回收（P5，FR-2.2.6 / FR-1.3.7）
-    def pull_skill(self, slug: str, runtime_key: str, *, dry_run: bool = False) -> dict:
+    def diff_runtime(self, slug: str, runtime_key: str) -> str:
+        """端间 diff：canonical@HEAD 的**渲染结果** vs Runtime 磁盘内容（CLI `diff --runtime`）。
+
+        基准侧取 `adapter.render_layout(snapshot)` 而不是裸 canonical 文件：
+        adapter 会按目标 runtime 重写 frontmatter / 生成 sidecar（如
+        `agents/openai.yaml`），拿裸文件比会把适配产物全部冒充成"磁盘新增"，
+        diff 直接不可读。
+
+        只比 `in_git` 文件（T2：未纳管资产不分发，也不该出现在 diff 里）。
+        二进制按"已变更"标记而不逐字节展开（T5 同口径）。
+        """
+        row = self.db.get_skill_by_slug(slug)
+        if row is None:
+            raise ValueError(f"未纳管的 skill: {slug}")
+        adapters = {a.key: a for a in all_adapters()}
+        adapter = adapters.get(runtime_key)
+        if adapter is None:
+            raise ValueError(f"未知 runtime: {runtime_key}（可选: {', '.join(adapters)}）")
+        target = adapter.resolve_root("user", home=self.home) / slug
+        if not target.is_dir():
+            raise ValueError(f"{slug} 未部署到 {runtime_key}（{target} 不存在），无可比较内容")
+
+        head = self._head()
+        snapshot = self.git.snapshot_at(head, slug)
+        desired = dict(adapter.render_layout(snapshot))
+        disk = {e.path: e.content for e in list_content_files(target) if e.in_git}
+        return _unified_diff(
+            desired, disk,
+            from_label=f"canonical@{head[:10]}",
+            to_label=f"{runtime_key}:{slug}",
+        )
+
+    def pull_skill(self, slug: str, runtime_key: str, *, dry_run: bool = False,
+                   message: str | None = None, by: str = "mcp") -> dict:
         """从 Runtime 磁盘回收改动为 canonical 新版本（FR-2.2.6）。
 
         第一版边界（危险决策留给人工，FR-1.3.5）：
@@ -1312,7 +1400,8 @@ class LocalEngine:
             for rel in removed:
                 safe_path(skill_dir, rel).unlink(missing_ok=True)
             commit = self.git.commit(
-                [f"skills/{slug}"], f"pull: 回收 {runtime_key} 磁盘改动为 canonical 新版本",
+                [f"skills/{slug}"],
+                message or f"pull: 回收 {runtime_key} 磁盘改动为 canonical 新版本",
             )
             log.info(
                 "git_commit_created",
@@ -1332,7 +1421,7 @@ class LocalEngine:
                 from_state="modified", to_state="synced",
                 detail={"changed": sorted(changed), "added": sorted(added),
                         "removed": removed},
-                by="mcp",
+                by=by,
             )
             log.info(
                 "sync_pull_completed",

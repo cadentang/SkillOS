@@ -184,7 +184,9 @@ def main() -> None:
             "SKILLOS_WEB_DIST": None if args.dev else (str(dist) if dist else None),
         }
         if not args.dev and not dist:
-            C.log("  注意：未找到 web/dist，后端将不托管 SPA（可用 --dev 或先 bootstrap）。")
+            C.log("  注意：未找到前端产物，后端将不托管 SPA。"
+                  "先跑 bootstrap（会自动解包 vendor/dist/web-dist.zip），"
+                  "或开发态用 --dev。")
         if binary:
             # 编译入口读环境变量：uvicorn CLI 的字符串入口在产物里不可用（docs/10 §4）
             extra["SKILLOS_HOST"] = host

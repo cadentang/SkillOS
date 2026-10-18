@@ -4,6 +4,9 @@
  *  数据源：daemon 本地结构化日志（endpoints.logsView, mode=daemon）。
  *  筛选事件 = sync_completed / sync_partial / sync_failed（P2 / FR-1.1.12）。
  *  daemon 离线 → 降级为「暂无记录」（读操作保留，FR-2.4.4）。
+ *  离线判定走 DaemonStatusContext（WS 心跳，与徽标/LogsPanel 同一口径）；
+ *  HTTP 请求失败但 WS 在线 ≠ daemon 离线（502 TIMEOUT / 401 / 网络抖动），
+ *  不得谎报离线。
  *
  *  视觉：
  *    .recent  flex-col
@@ -15,6 +18,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { endpoints, type LogEvent } from "../api/endpoints";
+import { useDaemonStatusCtx } from "../ws/DaemonStatusContext";
 
 type RowKind = "ok" | "warning" | "danger" | "tertiary";
 
@@ -84,6 +88,7 @@ const STATUS_LABEL: Record<RowKind, string> = {
 };
 
 export default function RecentSync() {
+  const daemon = useDaemonStatusCtx();
   const logs = useQuery({
     queryKey: ["recent-sync"],
     queryFn: () => endpoints.logsView({ mode: "daemon", tail: 60, level: "INFO" }),
@@ -125,7 +130,11 @@ export default function RecentSync() {
             className="h-[42px] flex items-center text-[var(--font-caption)]"
             style={{ color: "var(--text-tertiary)" }}
           >
-            {logs.isError ? "daemon 离线 · 暂无记录" : "暂无最近同步记录"}
+            {!daemon.connected
+              ? "daemon 离线 · 暂无记录"
+              : logs.isError
+                ? "记录读取失败 · 稍后重试"
+                : "暂无最近同步记录"}
           </div>
         ) : (
           rows.map((r, i) => (

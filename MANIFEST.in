@@ -1,0 +1,7 @@
+# sdist 必须带上前端产物：`python -m build` 的第二步是从 sdist 建 wheel，
+# 那时源码树里的 web/dist 已经不在，只认 setup.py 预先 stage 好的这份。
+# （stage 动作见 setup.py::sdist 钩子；本行负责让它真的进包）
+graft skillos/web_dist
+
+global-exclude *.py[cod]
+global-exclude __pycache__

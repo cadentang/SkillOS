@@ -14,7 +14,8 @@
     2. 建仓内 venv（`<state_dir>/.venv`）—— 依赖装这里，不污染系统 Python
     3. 装依赖（repo：`pip install -e .`；frozen：`pip install -r requirements.txt`）
     4. 校验 git 可用（缺则报错给指引）
-    5. 非 dev 模式下确保有 SPA 构建产物 web/dist（缺则尝试用 node 构建）
+    5. 非 dev 模式下确保有 SPA 构建产物：先看现成的 dist，再解包内归档
+       `vendor/dist/web-dist.zip`（离线可用、不需要 node），最后才尝试联网构建
 
 用法：
     python scripts/bootstrap.py              # 正常装
@@ -34,6 +35,7 @@ import argparse
 import os
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -279,16 +281,60 @@ def ensure_git(rt: dict) -> None:
     C.log(f"[4/5] git 就绪：{g.get('source')} {g.get('version') or g.get('path')}")
 
 
+def web_archive() -> Path:
+    """包内归档的前端产物 —— 由 skillos-builder 从 CI 的 `web-dist` artifact 原样拉回。
+
+    `vendor/dist/` 是归档区（gitignored、只留最新版本），文件名固定 `web-dist.zip`，
+    zip 根就是 `index.html` + `assets/`。
+    """
+    return C.package_root() / "vendor" / "dist" / "web-dist.zip"
+
+
+def extract_web_archive() -> Path | None:
+    """把包内 `vendor/dist/web-dist.zip` 解到 `<包>/web_dist`；成功返回该目录。
+
+    为什么需要这一步：交付归档里本来就带着前端，离线机 / 无 node 的机器也能单端口
+    起 Web；但此前没有任何代码读它 —— 用户手里有产物，却被告知"单端口不可用"。
+    解压是纯本地操作，所以排在联网构建**之前**（离线优先）。
+
+    失败（无 zip / 坏 zip / 解包后没有 index.html）只记日志并返回 None，
+    由调用方继续走 node 构建或 --dev —— 前端缺位不该阻断依赖安装。
+    """
+    archive = web_archive()
+    if not archive.is_file():
+        return None
+    dest = C.package_root() / "web_dist"
+    C.log(f"[5/5] 解包前端产物：{archive.name} → {dest}")
+    try:
+        dest.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(archive) as z:
+            # 来源是本包 vendor/ 下的自有归档（非外部输入）；extractall 自身会
+            # 剥掉绝对路径与 `..` 分量，不存在路径穿越。
+            z.extractall(dest)
+    except (OSError, zipfile.BadZipFile) as e:
+        C.log(f"  解包失败：{e}（继续尝试其它方式）")
+        return None
+    if not (dest / "index.html").is_file():
+        C.log("  解包后没有 index.html —— 归档不完整，已忽略")
+        return None
+    return dest
+
+
 def ensure_web_dist(rt: dict, repo: Path | None, dev: bool, offline: bool,
                     mirrors: dict | None = None) -> None:
     if dev:
         C.log("[5/5] dev 模式：Web 走 vite 热更，跳过 dist 检查")
         return
-    if C.web_dist_dir(repo):
-        C.log(f"[5/5] SPA 构建产物已就绪：{C.web_dist_dir(repo)}")
+    dist = C.web_dist_dir(repo)
+    if dist:
+        C.log(f"[5/5] SPA 构建产物已就绪：{dist}")
+        return
+    if extract_web_archive():
+        C.log(f"[5/5] SPA 已就绪（包内归档）：{C.web_dist_dir(repo)}")
         return
     if offline:
-        C.log("[5/5] 离线且无 web/dist —— 单端口模式不可用（可用 --dev，或预置 web_dist/）")
+        C.log("[5/5] 离线且无 web/dist、包内也没有 vendor/dist/web-dist.zip —— 单端口不可用")
+        C.log("      → 可用 --dev 走 vite；或把 CI 的 web-dist.zip 放到 vendor/dist/ 后重跑")
         return
     src = C.web_src_dir(repo)
     node = rt["node"] if rt["node"].get("source") == "system" else None
@@ -305,7 +351,11 @@ def ensure_web_dist(rt: dict, repo: Path | None, dev: bool, offline: bool,
         if C.web_dist_dir(repo):
             C.log("  构建完成。")
             return
-    C.log("[5/5] 无 web/dist 且无法构建（缺 node 或前端源码）—— 用 --dev，或预置 dist。")
+    C.log("[5/5] 无 web/dist 且无法构建（缺 node 或前端源码）—— 单端口不可用")
+    C.log("      → 有 node：cd web && npm ci && npm run build")
+    C.log("      → 无 node：把 CI 的 web-dist.zip 放进 vendor/dist/，"
+          "或手动解到 web_dist/（zip 根即 index.html）")
+    C.log("      → 或先用 --dev 走 vite 热更")
 
 
 def main() -> None:

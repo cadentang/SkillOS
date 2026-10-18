@@ -75,11 +75,142 @@ class TestSpaServing:
         assert "SKILLOS_SPA" not in r.text
         assert r.headers["content-type"].startswith("application/json")
 
-    def test_no_mount_without_env(self, tmp_path, monkeypatch) -> None:
-        """本地开发（vite 5173）不设 SKILLOS_WEB_DIST → 根路径不托管。"""
+    def test_unmatched_write_is_404_not_405(self, client) -> None:
+        """非 GET 的未注册路径 → 404（静态托管不能把它变成 405 Allow: GET,HEAD）。
+
+        回归用例：沙盒关闭时 `POST /api/sandbox/reset` 应当 404，
+        挂载 SPA 后曾被 StaticFiles 的 405 顶掉（2026-10-17）。
+        """
+        c, _ = client
+        r = c.post("/api/definitely-not-a-route", json={})
+        assert r.status_code == 404
+        assert r.headers["content-type"].startswith("application/json")
+
+    def test_wrong_method_on_existing_route_is_405(self, client) -> None:
+        """路径存在但方法不对 → 仍是 405（不能一律降级成 404）。"""
+        c, _ = client
+        r = c.post("/api/health")
+        assert r.status_code == 405
+        assert "GET" in r.headers.get("allow", "")
+
+    def test_no_mount_when_nothing_to_mount(self, tmp_path, monkeypatch) -> None:
+        """没有任何可挂载产物（vite 5173 开发态）→ 根路径不托管，照旧 404。
+
+        2026-10-17 语义收紧：以前是「没设 SKILLOS_WEB_DIST 就不挂载」，导致装好包
+        直接起服务的人首页 404。现在改为「按候选顺序自动探测，探测不到才不挂载」，
+        本用例通过清空候选来模拟"确实没有产物"。
+        """
+        from skillos.api import web
+
         monkeypatch.delenv("SKILLOS_WEB_DIST", raising=False)
+        monkeypatch.setattr(web, "_candidate_dirs", lambda: [])
         app = create_app(db_url=f"sqlite:///{tmp_path / 'c2.db'}", jwt_secret=SECRET)
         assert TestClient(app).get("/").status_code == 404
+
+    def test_env_var_is_sole_candidate(self, tmp_path, monkeypatch) -> None:
+        """显式给 SKILLOS_WEB_DIST 时不做任何回退：路径里没有 index.html 就报错。"""
+        from skillos.api import web
+
+        empty = tmp_path / "empty-dist"
+        empty.mkdir()
+        monkeypatch.setenv("SKILLOS_WEB_DIST", str(empty))
+        assert web._candidate_dirs() == [empty]
+        dist, reason = web.resolve_web_dist()
+        assert dist is None and "index.html" in reason
+
+    def test_auto_detect_from_repo_layout(self, tmp_path, monkeypatch) -> None:
+        """无环境变量时自动发现 `<repo>/web/dist`（源码 / editable 安装形态）。"""
+        from skillos.api import web
+
+        monkeypatch.delenv("SKILLOS_WEB_DIST", raising=False)
+        repo = tmp_path / "repo"
+        (repo / "skillos" / "api").mkdir(parents=True)
+        (repo / "web" / "dist").mkdir(parents=True)
+        (repo / "web" / "dist" / "index.html").write_text("spa", encoding="utf-8")
+        monkeypatch.setattr(web, "__file__", str(repo / "skillos" / "api" / "web.py"))
+        dist, source = web.resolve_web_dist()
+        assert dist == repo / "web" / "dist"
+        assert source == "auto"
+
+    def test_source_tree_prefers_local_build_over_bundled(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """源码树里 `web/dist` 必须压过 `skillos/web_dist`（2026-10-17 实测踩坑）。
+
+        `skillos/web_dist` 是 `pip wheel` 的构建副产物，打完包就留在树里不再更新。
+        若它排在前面，`npm run build` 出的新产物永远被旧快照挡住 —— 现象是
+        「重建了前端，页面还是老版本、assets 哈希没变」。
+        """
+        from skillos.api import web
+
+        monkeypatch.delenv("SKILLOS_WEB_DIST", raising=False)
+        repo = tmp_path / "repo"
+        (repo / "skillos" / "api").mkdir(parents=True)
+        (repo / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+        # 构建副产物（旧）
+        (repo / "skillos" / "web_dist").mkdir(parents=True)
+        (repo / "skillos" / "web_dist" / "index.html").write_text(
+            "old", encoding="utf-8"
+        )
+        # 本地新构建
+        (repo / "web" / "dist").mkdir(parents=True)
+        (repo / "web" / "dist" / "index.html").write_text("new", encoding="utf-8")
+        monkeypatch.setattr(web, "__file__", str(repo / "skillos" / "api" / "web.py"))
+        dist, _ = web.resolve_web_dist()
+        assert dist == repo / "web" / "dist"
+        # 反过来：装机形态（无 pyproject.toml）随包产物优先
+        (repo / "pyproject.toml").unlink()
+        dist, _ = web.resolve_web_dist()
+        assert dist == repo / "skillos" / "web_dist"
+
+    def test_frontend_source_dir_is_never_a_candidate(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """源码根 `web/` 有 vite 源模板 index.html，绝不能被当成产物挂上去。
+
+        真实现场：新克隆仓库还没 `npm run build` 时，候选表里那条
+        `pkg_dir.parent / "web"`（本意是发行包的 runtime/web）正好命中
+        `web/`，`index.html` 判据照样通过 → 浏览器白屏、`/src/main.tsx` 404，
+        而不是「前端未构建」的提示。判据是目录里有 package.json / src/。
+        """
+        from skillos.api import web
+
+        monkeypatch.delenv("SKILLOS_WEB_DIST", raising=False)
+        repo = tmp_path / "repo"
+        (repo / "skillos" / "api").mkdir(parents=True)
+        (repo / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+        # vite 源模板：index.html 引 /src/main.tsx，旁边有 package.json 与 src/
+        (repo / "web" / "src").mkdir(parents=True)
+        (repo / "web" / "package.json").write_text("{}", encoding="utf-8")
+        (repo / "web" / "index.html").write_text(
+            '<script type="module" src="/src/main.tsx"></script>', encoding="utf-8"
+        )
+        monkeypatch.setattr(web, "__file__", str(repo / "skillos" / "api" / "web.py"))
+
+        assert repo / "web" not in web._candidate_dirs()
+        dist, reason = web.resolve_web_dist()
+        assert dist is None
+        assert "npm run build" in reason
+
+    def test_explicit_env_pointing_at_source_dir_is_rejected(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """显式给源码目录要报错，而不是"挂上去看起来成功"。
+
+        显式路径不参与回退（hard-miss），但也不能因为"有 index.html"就放行 ——
+        那等于把白屏伪装成可用。
+        """
+        from skillos.api import web
+
+        src = tmp_path / "web"
+        (src / "src").mkdir(parents=True)
+        (src / "package.json").write_text("{}", encoding="utf-8")
+        (src / "index.html").write_text("<div id=root></div>", encoding="utf-8")
+        monkeypatch.setenv("SKILLOS_WEB_DIST", str(src))
+
+        dist, reason = web.resolve_web_dist()
+        assert dist is None
+        assert "源码目录" in reason
 
 
 class TestWebSocketReachability:

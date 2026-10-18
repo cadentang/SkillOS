@@ -7,8 +7,8 @@ export const MonacoEditor = lazy(() => import("./MonacoEditor"));
 export function EditorFallback() {
   return (
     <div
-      className="flex items-center justify-center rounded-[var(--radius-control)] border"
-      style={{ height: 420, borderColor: "var(--border)", color: "var(--text-secondary)" }}
+      className="flex min-h-0 flex-1 items-center justify-center rounded-[var(--radius-control)] border"
+      style={{ borderColor: "var(--border)", color: "var(--text-secondary)" }}
     >
       编辑器加载中…
     </div>

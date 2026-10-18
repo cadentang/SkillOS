@@ -174,7 +174,7 @@ export default function SkillDetail() {
   ];
 
   return (
-    <div className="flex flex-col gap-md">
+    <div className="flex h-full flex-col gap-md">
       {/* ────── 面包屑（设计稿 .crumbs） ────── */}
       <nav
         className="flex items-center gap-sm text-[13px]"
@@ -299,9 +299,13 @@ export default function SkillDetail() {
 
       {/* ───────── Files：树 + 编辑器 + FrontmatterForm ───────── */}
       {tab === "files" && (
-        <div className="flex gap-md">
+        /* 480px 高度下限：极矮视口下编辑器不至于被压扁；超出部分由
+           页面级滚动兜底（列 min-h-screen 会随内容增长）。
+           注意不能同时留 min-h-0——两个 min-height 类冲突，后者按 CSS
+           生成顺序覆盖，行为不可预期。 */
+        <div className="flex min-h-[480px] flex-1 gap-md">
           <aside
-            className="flex w-[220px] shrink-0 flex-col gap-xs p-sm"
+            className="flex min-h-0 w-[220px] shrink-0 flex-col gap-xs p-sm"
             style={{
               background: "var(--surface)",
               border: "1px solid var(--border)",
@@ -314,7 +318,7 @@ export default function SkillDetail() {
             >
               文件树（{tree.data?.tree.length ?? 0}）
             </p>
-            <ul className="flex flex-col gap-xs">
+            <ul className="flex min-h-0 flex-1 flex-col gap-xs overflow-y-auto">
               {(tree.data?.tree ?? []).map((f) => (
                 <li key={f.path}>
                   <button
@@ -351,7 +355,7 @@ export default function SkillDetail() {
             </ul>
           </aside>
 
-          <div className="min-w-0 flex-1">
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
             {!activeFile && (
               <p className="py-lg" style={{ color: "var(--text-secondary)" }}>
                 选择左侧文件查看 / 编辑（保存需 daemon 在线）
@@ -368,7 +372,7 @@ export default function SkillDetail() {
               />
             )}
             {activeFile && (
-              <div className="mt-md flex flex-col gap-sm">
+              <div className="mt-md flex min-h-0 flex-1 flex-col gap-sm">
                 <LazyEditor
                   value={editorValue}
                   language={
@@ -380,7 +384,7 @@ export default function SkillDetail() {
                   }
                   onChange={setEditorValue}
                 />
-                <div className="flex items-center gap-md">
+                <div className="flex shrink-0 items-center gap-md">
                   <button
                     type="button"
                     disabled={!daemon.connected}

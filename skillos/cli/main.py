@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -33,8 +34,7 @@ for _s in (sys.stdout, sys.stderr):
     if hasattr(_s, "reconfigure"):
         _s.reconfigure(encoding="utf-8", errors="replace")
 
-# CLI 模式日志初始化（必须先于任何 command 注册）
-setup_logging("cli")
+# CLI 日志初始化**不在模块级执行**（见 _cli_callback 内注释）
 log = get_logger("skillos.cli")
 
 app = typer.Typer(
@@ -45,14 +45,27 @@ app = typer.Typer(
 console = Console()
 
 
+# 服务型子命令：长驻进程，自带 setup_logging（daemon / mcp / serve 各自的
+# 进程入口挂自己的 sink：serve 走 `create_app()` 里的 setup_logging("api")）。
+# 若 CLI 先跑 setup_logging("cli")，core.logging 的
+# _initialized 守卫会把它们的初始化整个吞掉 —— daemon.log 永不创建，
+# Web「最近同步记录」永远为空（2026-10-11 踩坑，详见 docs/09 排查表）。
+_SERVICE_SUBCOMMANDS = frozenset({"daemon", "mcp", "serve"})
+
+
 @app.callback()
 def _cli_callback(ctx: typer.Context) -> None:
-    """每个 CLI 命令入口：分配 op_id + 记 started（命令级事件）。
+    """每个 CLI 命令入口：CLI 日志初始化 + 分配 op_id + 记 started（命令级事件）。
 
     命令完成（completed / failed）由 services 层埋点承担（避免双重记录）。
     CLI 模式默认级别 WARNING，本日志静默；`SKILLOS_LOG_LEVEL=INFO` 激活。
     """
     cmd = ctx.invoked_subcommand or "skillos"
+    # 必须在命令执行前（而非 import 时）初始化，且跳过服务型子命令：
+    # 它们的入口（daemon/main.py / mcp/server.py）各自调 setup_logging
+    # 挂自己的 sink，被 cli 初始化抢先会让 _initialized 守卫吞掉后续调用
+    if cmd not in _SERVICE_SUBCOMMANDS:
+        setup_logging("cli")
     op_id = bind_op_id(component="cli", command=cmd)
     log.info(
         "cli_command_started",
@@ -64,6 +77,7 @@ def _cli_callback(ctx: typer.Context) -> None:
 # 退出码（04 §2.5.1）
 EXIT_OK = 0
 EXIT_FAIL = 1
+EXIT_USAGE = 2
 EXIT_CONFLICT = 3
 
 # 冲突类错误码 → 退出码 3（其余失败 → 1）
@@ -104,10 +118,18 @@ def _all_slugs(engine) -> list[str]:
 
 
 def _print_report(report) -> None:
-    """分发结果逐目标呈现；冲突类退出码 3。"""
+    """分发结果逐目标呈现；冲突类退出码 3。
+
+    三态而非两态（2026-10-17 修复）：只看 `wrote` 会把「dry-run 预览到要写」
+    和「已是最新」都判成幂等跳过 —— 全新 skill 四端皆空时 dry-run 报"已是最新"。
+    `action` 由 distribute 的前置判定给出，dry-run 与真跑同源（FR-1.3.7）。
+    """
     for o in report.outcomes:
-        if o.ok and not o.wrote:
+        if o.ok and o.action == "skip":
             console.print(f"  [green]✓[/green] {o.runtime_key}: 已是最新（幂等跳过）")
+        elif o.ok and not o.wrote:
+            extra = f"，未纳管资产保留 {len(o.skipped_assets)} 个" if o.skipped_assets else ""
+            console.print(f"  [cyan]→[/cyan] {o.runtime_key}: 将部署（dry-run，未写入）{extra}")
         elif o.ok:
             extra = f"，未纳管资产保留 {len(o.skipped_assets)} 个" if o.skipped_assets else ""
             console.print(f"  [green]✓[/green] {o.runtime_key}: 已部署{extra}")
@@ -117,12 +139,17 @@ def _print_report(report) -> None:
                 console.print(f"      - {p}")
         else:
             console.print(f"  [red]✗ {o.runtime_key}: {o.error_code} {o.detail or ''}[/red]")
+    preview = any(o.ok and o.action == "write" and not o.wrote for o in report.outcomes)
     if report.ok:
-        console.print("[green]分发完成[/green]")
+        console.print("[green]预览完成（dry-run 未写入任何文件）[/green]" if preview
+                      else "[green]分发完成[/green]")
         return
     codes = {o.error_code for o in report.outcomes}
     if codes & _CONFLICT_CODES:
-        console.print("[yellow]存在冲突待处理（--confirm-removals 可确认删除清单）[/yellow]")
+        if any(o.error_code == "REMOVALS_REQUIRE_CONFIRM" for o in report.outcomes):
+            console.print("[yellow]存在冲突待处理（--confirm-removals 可确认删除清单）[/yellow]")
+        else:
+            console.print("[yellow]存在冲突待处理[/yellow]")
         raise typer.Exit(EXIT_CONFLICT)
     raise typer.Exit(EXIT_FAIL)
 
@@ -166,15 +193,22 @@ def scan(
 @app.command("import")
 def import_(
     paths: list[str] = typer.Argument(None, help="待纳管目录（缺省=扫描四端全部）"),
-    source: str = typer.Option("local", "--source", help="local | git:<url>"),
+    source: str = typer.Option("local", "--source", help="local | git:<url>（git 走 P2）"),
     json_output: bool = typer.Option(False, "--json"),
     repo: str = typer.Option(None, "--repo", help="canonical 仓库路径"),
 ) -> None:
     """纳管已有 Skill 目录（FR-1.0.16 / FR-1.1.3）。同名多副本见 04 §2.2.5 决策表。"""
-    if paths:
-        _not_implemented("import <paths>（指定路径纳管走 P2）")
+    if source.startswith("git:"):
+        console.print(
+            "[yellow]`--source git:<url>` 尚未实现（P2）：当前只支持纳管本机已扫描到的目录[/yellow]"
+        )
+        raise typer.Exit(EXIT_USAGE)
     engine = _make_engine(repo)
-    plan = engine.import_skills()
+    try:
+        plan = engine.import_skills(paths=paths or None)
+    except ValueError as e:
+        console.print(f"[red]✗ {e}[/red]")
+        raise typer.Exit(EXIT_FAIL) from None
     if json_output:
         console.print_json(json.dumps({
             "skills": [p.slug for p in plan.skills],
@@ -361,10 +395,45 @@ def push(
 def pull(
     slug: str = typer.Argument(...),
     from_: str = typer.Option(..., "--from", help="来源 runtime"),
-    message: str = typer.Option(None, "--message"),
+    message: str = typer.Option(None, "--message", help="commit 说明（缺省自动生成）"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="只预览改动，不写 canonical"),
+    repo: str = typer.Option(None, "--repo", help="canonical 仓库路径"),
 ) -> None:
-    """回收 Runtime 改动为新版本（FR-2.2.6）。"""
-    _not_implemented("pull")
+    """回收 Runtime 改动为新版本（FR-1.1.6 / FR-2.2.6）。冲突退出码 3。
+
+    与 MCP 的 `skillos_sync_pull` 同一实现（services.engine.pull_skill）：
+    双向分歧（canonical 在基线之后也前进过）→ CONFLICT，交 Web 人工处理。
+    """
+    engine = _make_engine(repo)
+    try:
+        result = engine.pull_skill(slug, from_, dry_run=dry_run, message=message, by="cli")
+    except ValueError as e:
+        console.print(f"[red]✗ {e}[/red]")
+        raise typer.Exit(EXIT_FAIL) from None
+    if not result.get("ok"):
+        console.print(f"[red]✗ {result.get('error_code')}: {result.get('detail')}[/red]")
+        if result.get("error_code") == "CONFLICT":
+            raise typer.Exit(EXIT_CONFLICT)
+        raise typer.Exit(EXIT_FAIL)
+    if result.get("noop"):
+        console.print(f"[green]✓[/green] {slug}@{from_}: 无改动可回收（与基线一致）")
+        raise typer.Exit(EXIT_OK)
+    changed = result.get("changed") or []
+    added = result.get("added") or []
+    removed = result.get("removed") or []
+    head = "预览：将回收" if dry_run else "已回收"
+    console.print(f"[bold]{head} {slug} ← {from_}[/bold]")
+    for label, items in (("修改", changed), ("新增", added), ("删除", removed)):
+        if not items:
+            continue
+        console.print(f"  {label} {len(items)} 个:")
+        for p in items:
+            console.print(f"    - {p}")
+    if dry_run:
+        console.print("[yellow]dry-run：未写入任何文件（去掉 --dry-run 才落盘）[/yellow]")
+        raise typer.Exit(EXIT_OK)
+    console.print(f"[green]✓[/green] 新版本 {result['commit'][:10]}")
+    console.print("[dim]注意：回收只动 canonical，其它 Runtime 需再 push[/dim]")
 
 
 @app.command()
@@ -396,17 +465,26 @@ def diff(
     runtime: str = typer.Option(None, "--runtime"),
     repo: str = typer.Option(None, "--repo", help="canonical 仓库路径"),
 ) -> None:
-    """版本间 diff。二进制第一版只显示「已变更」（T5）。"""
-    if runtime:
-        _not_implemented("diff --runtime（端间 diff 走 P3）")
+    """版本间 diff（`--from/--to`）或端间 diff（`--runtime`）。二进制只显示「已变更」（T5）。"""
     engine = _make_engine(repo)
+    if runtime:
+        try:
+            text = engine.diff_runtime(slug, runtime)
+        except ValueError as e:
+            console.print(f"[red]✗ {e}[/red]")
+            raise typer.Exit(EXIT_FAIL) from None
+        if not text.strip():
+            console.print("[green]无差异（磁盘与该 Runtime 的 canonical 渲染结果一致）[/green]")
+            return
+        console.print(text, markup=False, highlight=False)
+        return
     base = engine.git.resolve_ref(from_ref) if from_ref else engine.git.resolve_ref("HEAD")
     head = engine.git.resolve_ref(to_ref) if to_ref else engine.git.resolve_ref("HEAD")
     text = engine.git.diff(base, head, path=f"skills/{slug}")
     if not text.strip():
         console.print("[green]无差异[/green]")
         return
-    console.print(text)
+    console.print(text, markup=False, highlight=False)
 
 
 @app.command()
@@ -442,7 +520,11 @@ def check(
     """质量检查（FR-1.0.11，规则表见 core/algorithm/checks.py）。"""
     engine = _make_engine(repo)
     if not skill:
-        _not_implemented("check --all（全量检查走 P2）")
+        console.print(
+            "[yellow]用法: skillos check --skill <slug>[/yellow]\n"
+            "[dim]全量检查（--all）走 P2；当前逐个 skill 检查[/dim]"
+        )
+        raise typer.Exit(EXIT_USAGE)
     try:
         result = engine.gate_of(skill)
     except Exception as e:
@@ -472,8 +554,8 @@ def devices(
     json_output: bool = typer.Option(False, "--json"),
     revoke: str = typer.Argument(None, help="撤销指定设备 id"),
 ) -> None:
-    """设备清单 / 撤销（FR-1.2.8）。"""
-    _not_implemented("devices")
+    """设备清单 / 撤销（FR-1.2.8，P3 未实现：当前请用 Web 的 /api/devices 人工路径）。"""
+    _not_implemented("devices（P3：设备撤销走 Web 人工路径）")
 
 
 @app.command()
@@ -498,6 +580,61 @@ def mcp() -> None:
     from skillos.mcp.server import main as mcp_main
 
     mcp_main()
+
+
+@app.command()
+def serve(
+    host: str = typer.Option("127.0.0.1", "--host", help="监听地址（容器内用 0.0.0.0）"),
+    port: int = typer.Option(9080, "--port", "-p", help="监听端口"),
+    reload: bool = typer.Option(False, "--reload", help="改动 Python 源码后自动重启（仅开发）"),
+    dev: bool = typer.Option(False, "--dev", help="前端走 vite 热更：不挂载 SPA"),
+    open_browser: bool = typer.Option(False, "--open", help="启动后自动打开浏览器"),
+    db_url: str = typer.Option(
+        None, "--db-url", help="覆盖 SKILLOS_DB_URL（默认 ./skillos-cloud.db）"
+    ),
+) -> None:
+    """启动 Web 控制台（FastAPI 与 SPA 同进程，04 §1.4 容器 A）。
+
+    单端口形态下「起前端」= 起后端：`mount_web()` 自动定位 SPA 产物
+    （随包 `skillos/web_dist` / 源码 `web/dist` / 发行包 `runtime/web`）。
+
+    `--dev` 不挂载 SPA，前端另起 `npm run dev`（vite 5173，proxy /api 与 /ws
+    到本进程）—— 由 `SKILLOS_WEB_DIST=off` 表达，前端源码改动即时生效。
+    """
+    import webbrowser
+    from threading import Timer
+
+    import uvicorn
+
+    from skillos.api.web import resolve_web_dist
+
+    if db_url:
+        os.environ["SKILLOS_DB_URL"] = db_url
+    if dev:
+        os.environ["SKILLOS_WEB_DIST"] = "off"
+        dist, note = None, "dev 模式：前端由 vite 提供"
+    else:
+        dist, note = resolve_web_dist()
+
+    shown_host = "127.0.0.1" if host in ("0.0.0.0", "::", "") else host
+    url = f"http://{shown_host}:{port}/"
+    console.print(f"[bold]Skill OS 控制台[/bold] → {url}")
+    if dist is not None:
+        console.print(f"  SPA 产物：{dist}")
+    else:
+        # 装好包却打不开是最容易劝退的一种失败，这里把三条出路一次说清
+        console.print(f"  [yellow]SPA 未挂载（{note}）[/yellow]")
+        console.print("    源码仓库：cd web && npm run build")
+        console.print("    wheel 安装：确认包内有 skillos/web_dist（见 setup.py 的 stage 钩子）")
+        console.print("    任意来源：SKILLOS_WEB_DIST=<dist 目录> skillos serve")
+    if dev:
+        console.print("  前端热更：cd web && npm run dev → http://127.0.0.1:5173/")
+
+    if open_browser:
+        # 延迟开：uvicorn 还没绑端口时打开会先拿到连接拒绝
+        Timer(1.5, lambda: webbrowser.open(url)).start()
+
+    uvicorn.run("skillos.api.asgi:app", host=host, port=port, reload=reload)
 
 
 @app.command()

@@ -135,7 +135,25 @@ class TestOwnership:
         )
         out = report.outcomes[0]
         assert out.ok and out.wrote is False
+        # 幂等跳过与「dry-run 将写」都是 wrote=False，必须靠 action 区分（2026-10-17）
+        assert out.action == "skip"
         assert out.new_installed_hash == aggregate_hash(desired)
+
+    def test_dry_run_marks_would_write(self, layout) -> None:
+        """FR-1.3.7 / 三态：dry-run 对「需要写」的目标必须给 action=write + wrote=False。
+
+        回归用例：只看 wrote 会把「全新安装」误报成「已是最新（幂等跳过）」，
+        CLI 与 MCP（默认 dry_run=true）都会据此告诉用户"无需同步"。
+        """
+        deploy, backups = layout
+        report = distribute_skill(
+            _snapshot(), "c1", [_target(deploy)],
+            policy=ReplacePolicy.RECORDED, backups_dir=backups, dry_run=True,
+        )
+        out = report.outcomes[0]
+        assert out.ok and out.wrote is False
+        assert out.action == "write"          # 真跑会写
+        assert not (deploy / "demo").exists()  # 但 dry-run 零写入
 
     def test_recorded_allows_our_old_content(self, layout) -> None:
         """RECORDED：disk == installed_hash（我们装过的旧版）→ 允许更新（OUTDATED 路径）。"""

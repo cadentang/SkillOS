@@ -18,6 +18,10 @@ start.sh
 BUILD-INFO.json
 README.txt
 
+# bootstrap 从包内归档（vendor/dist/web-dist.zip）解出来的前端产物
+# 与 runtime/ 同性质：体积大、可由归档重建，不入库
+web_dist/
+
 # 保留规约文件
 !vendor/manifest.json
 !vendor/README.md

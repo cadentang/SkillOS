@@ -94,6 +94,11 @@ python scripts/bootstrap.py --mirror cn  # 国内镜像（pip 清华 + npm npmmi
 
 装进 `<状态目录>/.venv`，**不碰系统 Python**。重复跑不会重复装。
 
+**前端产物（单端口模式的前提）**：`bootstrap` 第 5 步按「现成 dist → 包内归档 →
+node 构建」顺序解析。包内归档是 `vendor/dist/web-dist.zip`（CI 的 `web-dist`
+artifact，zip 根即 `index.html` + `assets/`），会被自动解到 `<包>/web_dist/` ——
+**离线机、无 node 也能起单端口**。只有三者都不可用时才需要 `--dev`（vite 热更）。
+
 > **国内网络建议带 `--mirror cn`**：直连 PyPI / npm 常慢到不可用（实测直连约
 > 50 KB/s，清华源可到 MB/s 量级）。预设：`cn` / `tuna` / `aliyun` / `tencent` /
 > `ustc`，也可直接给 URL（`--mirror https://.../simple`），或细化到

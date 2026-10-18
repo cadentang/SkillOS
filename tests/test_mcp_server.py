@@ -95,6 +95,11 @@ def test_push_default_dry_run_writes_nothing(mcp_env):
     home = mcp_env[1]
     for key in ("agents", "workbuddy", "codex"):
         assert not (home / f".{key}" / "skills" / "demo").exists(), key
+    # Agent 侧判据：wrote=False 不等于「无需同步」，必须同时看 action/would_write
+    for o in r["data"]["outcomes"]:
+        assert o["wrote"] is False
+        assert o["action"] in ("skip", "write")
+        assert o["would_write"] is (o["action"] == "write")
 
 
 def test_push_real_then_gate_failed_passthrough(mcp_env):

@@ -41,8 +41,8 @@ export default function MonacoEditor({
   }, []);
 
   return (
-    <div ref={holder} className="overflow-hidden rounded-[var(--radius-control)] border"
-         style={{ borderColor: "var(--border)", height: 420 }}>
+    <div ref={holder} className="min-h-0 flex-1 overflow-hidden rounded-[var(--radius-control)] border"
+         style={{ borderColor: "var(--border)" }}>
       <Editor
         height="100%"
         language={language}

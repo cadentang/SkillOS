@@ -140,3 +140,59 @@ class TestClosedLoop:
         # 未 push：只有 claude/agents 有磁盘副本，workbuddy/codex「不适用」不进矩阵
         keys = {c.runtime_key for c in engine.status_matrix()}
         assert keys == {"claude", "agents"}
+
+
+class TestRuntimeDiffAndPathImport:
+    """CLI `diff --runtime` 与 `import <path>` 的引擎侧判据（2026-10-17 修复）。
+
+    这两个命令此前在 `--help` 里正常列出、执行却报"尚未实现"；补实现时
+    把判据落在引擎层，CLI 只做呈现（分层红线）。
+    """
+
+    def test_diff_runtime_clean_after_push(self, env) -> None:
+        engine, _ = env
+        engine.init_env()
+        engine.import_skills()
+        assert engine.push_skill("demo").ok
+        assert engine.diff_runtime("demo", "claude").strip() == ""
+
+    def test_diff_runtime_shows_user_edit(self, env) -> None:
+        engine, home = env
+        engine.init_env()
+        engine.import_skills()
+        assert engine.push_skill("demo").ok
+        p = home / ".claude" / "skills" / "demo" / "SKILL.md"
+        p.write_bytes(p.read_bytes() + b"\nuser note\n")
+        text = engine.diff_runtime("demo", "claude")
+        assert "SKILL.md" in text
+        assert "+user note" in text
+        # 与 push 同一判据：另一端的 diff 仍为空
+        assert engine.diff_runtime("demo", "agents").strip() == ""
+
+    def test_diff_runtime_unknown_or_undeployed(self, env) -> None:
+        engine, _ = env
+        engine.init_env()
+        engine.import_skills()
+        with pytest.raises(ValueError, match="未知 runtime"):
+            engine.diff_runtime("demo", "nosuch")
+        with pytest.raises(ValueError, match="未部署"):
+            engine.diff_runtime("demo", "workbuddy")  # 未 push 过，磁盘无目录
+
+    def test_import_only_given_path(self, env) -> None:
+        """`import <path>` 只纳管该目录下的 skill，不把其它副本一起纳进来。"""
+        engine, home = env
+        engine.init_env()
+        extra = home / ".claude" / "skills" / "extra-skill"
+        extra.mkdir(parents=True)
+        (extra / "SKILL.md").write_bytes(
+            b"---\nname: extra\ndescription: only this one should be imported\n---\nbody\n"
+        )
+        plan = engine.import_skills(paths=[str(extra)])
+        assert [p.slug for p in plan.skills] == ["extra-skill"]
+        assert engine.db.get_skill_by_slug("demo") is None
+
+    def test_import_bad_path_raises(self, env) -> None:
+        engine, _ = env
+        engine.init_env()
+        with pytest.raises(ValueError, match="没有发现可纳管"):
+            engine.import_skills(paths=[str(Path("__no_such_dir__"))])

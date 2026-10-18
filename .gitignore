@@ -28,6 +28,14 @@ web/dist/
 web/.vite/
 web/tsconfig.tsbuildinfo
 
+# 构建期从 web/dist 拷入的 SPA（setup.py 的 build_py 钩子生成，随 wheel 分发）
+skillos/web_dist/
+
+# setuptools 中间产物（build/ 本身是编译管线源码目录，只忽略生成物）
+build/lib/
+build/bdist/
+build/*.egg-info/
+
 # AI 辅助工具的项目级数据（计划/会话状态，非交付物）
 .codebuddy/
 .workbuddy/memory/
