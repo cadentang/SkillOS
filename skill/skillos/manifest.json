@@ -1,7 +1,7 @@
 {
   "_note": "Skill OS 一体化 Skill 包发行清单。声明本发行物需要哪些运行时、端口、落位；detect / bootstrap / start / status 全部以此为准。想切换『源码形态 ↔ frozen / 二进制形态』或改端口，只改这里，不改脚本。",
   "name": "skillos",
-  "launcher_version": "0.1.0",
+  "launcher_version": "0.2.0",
   "skillos_version": "0.1.0",
   "protocol_version": 1,
   "mode": "auto",
