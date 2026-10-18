@@ -166,7 +166,8 @@ jobs:
 
       - name: Collect assets
         run: |
-          mkdir -p release
+          set -euo pipefail
+          rm -rf release && mkdir -p release      # 从零开始，避免上一轮残留让断言失效
           # 编译 job 上传的是「目录 + 交付 zip」，download-artifact 会保留路径层级，
           # 这里平铺到 release/ 下（不同平台 zip 名不冲突）。
           find artifacts -name '*.zip' -type f -print -exec cp -n {} release/ \;
@@ -175,15 +176,31 @@ jobs:
             (cd artifacts/web-dist && zip -qr "$GITHUB_WORKSPACE/release/web-dist.zip" .)
           fi
           ls -lh release
+          # 硬断言：5 个交付包一个都不能少，否则宁可不发（残缺 release 比没有更糟）
           test -f release/web-dist.zip
+          for p in win-x64 linux-x64 mac-arm64 mac-x64; do
+            ls release/skillos-*-"$p".zip >/dev/null 2>&1 || {
+              echo "::error::缺少平台交付包 $p（release/ 现有：$(ls release)）"; exit 1; }
+          done
+          echo "交付包齐全：$(ls -1 release/*.zip | wc -l) 个"
 
       - name: Publish to GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          # publish job 没有 checkout（也不需要），gh 因此拿不到 git remote；
+          # 不显式给仓库就会报 "no git remotes found" 而失败。
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
         run: |
-          TAG="${{ github.ref_name }}"
-          gh release view "$TAG" >/dev/null 2>&1 || \
-            gh release create "$TAG" --title "SkillOS $TAG" \
+          set -euo pipefail
+          echo "repo=$GH_REPO tag=$TAG"
+          if gh release view "$TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
+            echo "release 已存在，直接补传附件"
+          else
+            gh release create "$TAG" --repo "$GH_REPO" \
+              --title "SkillOS $TAG" \
               --notes "SkillOS $TAG 编译发行包：win-x64 / linux-x64 / mac-arm64 / mac-x64，外加 web 前端产物 web-dist.zip。"
-          gh release upload "$TAG" release/*.zip --clobber
-          gh release view "$TAG" --json assets --jq '.assets[] | "\(.name)  \(.size)"'
+          fi
+          gh release upload "$TAG" release/*.zip --repo "$GH_REPO" --clobber
+          gh release view "$TAG" --repo "$GH_REPO" --json assets \
+            --jq '.assets[] | "\(.name)  \(.size)"'
