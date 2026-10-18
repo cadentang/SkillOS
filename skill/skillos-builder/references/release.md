@@ -13,7 +13,8 @@ git tag vX.Y.Z && git push origin vX.Y.Z      ← 沙箱外跑
         │ 触发 release.yml（四平台矩阵 + web）
         ▼  约 3-6 分钟
 Artifacts：skillos-win-x64 / skillos-linux-x64 / skillos-mac-arm64 / skillos-mac-x64 / web-dist
-        │ release_pull.py（token 一次性传入）
+        │ publish job：同时挂到该 tag 的 GitHub Release（匿名可下）
+        │ release_pull.py（默认走 Release，**免 token**）
         ▼  先清旧、只留最新
 skill/skillos/vendor/dist/                    ← 最终归档位（gitignored）
 ```
@@ -97,22 +98,29 @@ curl -s "https://api.github.com/repos/cadentang/SkillOS/actions/runs/<run_id>/jo
 
 - 四个 `Compile (<平台>)` job 全 success 才算绿；失败时 job 页 annotations 也有线索。
 
-### 1.5 拉产物归位
-
-先让用户现场生成 fine-grained token：GitHub → Settings → Developer settings →
-**Fine-grained tokens** → Generate new token：仅勾 `SkillOS` 仓库、**Actions: Read-only**、7 天过期。
+### 1.5 拉产物归位（默认免 token）
 
 ```bash
-SKILLOS_GH_TOKEN=<token> python scripts/release_pull.py          # 最新成功 run
-SKILLOS_GH_TOKEN=<token> python scripts/release_pull.py --run <run_id>
-SKILLOS_GH_TOKEN=<token> python scripts/release_pull.py --list   # dry-run 只看清单
-SKILLOS_GH_TOKEN=<token> python scripts/release_pull.py --jobs 8 # 并发连接数（默认 5）
+python scripts/release_pull.py                     # 最新 Release（无需 token）
+python scripts/release_pull.py --tag v0.2.2        # 指定版本
+python scripts/release_pull.py --list              # dry-run 只看清单
+python scripts/release_pull.py --jobs 8            # 并发连接数（默认 5）
 ```
 
-脚本行为：**并发**下载 5 个 artifact（默认 5 连接）→ 从平台 artifact 的**两层结构**中
-只取内层交付 zip → 清空 `skill/skillos/vendor/dist/` 旧内容 → 落新 → 写 `RELEASE-INFO.json`。
+脚本行为：**并发**下载 5 个文件（默认 5 连接）→ 清空 `skill/skillos/vendor/dist/` 旧内容 →
+落新 → 写 `RELEASE-INFO.json`（含 `source: release|artifact`）。
 
-**为什么必须并发**：artifact 下载是 302 → Azure 签名 CDN，**单连接会被限速**。实测同一批
+**两条通道**（`--source auto` 默认：先 Release，不行才回退 artifact）：
+
+| 通道 | 需要 token | 取法 |
+|---|---|---|
+| **release**（正常） | **不需要** | CI `publish` job 已把 5 个交付 zip 挂到该 tag 的 Release，`browser_download_url` 直接下 |
+| artifact（回退） | 需要 | `--source artifact` 或 `--run <id>`；artifact 下载强制鉴权（公开仓库也 401） |
+
+回退时现场生成 fine-grained token：GitHub → Settings → Developer settings →
+**Fine-grained tokens** → 仅勾 `SkillOS` 仓库、**Actions: Read-only**、7 天过期；用完吊销。
+
+**为什么必须并发**：下载是 302 → Azure 签名 CDN，**单连接会被限速**。实测同一批
 390MB：单线程 51 KB/s（≈2 小时），5 并发聚合 700 KB/s（≈10 分钟）。慢的时候 `--jobs 8`。
 
 下载全程落系统临时目录（`%TEMP%/skillos-release-*`），**全部成功才动归档区** ——
@@ -130,7 +138,8 @@ SKILLOS_GH_TOKEN=<token> python scripts/release_pull.py --jobs 8 # 并发连接�
 
 本机 Windows 时用仓库 `build/smoke.py --dist <win 解包目录>`（42 项断言：CLI / MCP 八工具白名单 / 后端+SPA）。
 
-汇报至少含：版本、run 链接、各平台产物大小、vendor/dist 最终清单、冒烟结论，并**提醒吊销 token**。
+汇报至少含：版本、Release 链接（或 run 链接）、各平台产物大小、vendor/dist 最终清单、冒烟结论。
+只在回退了 artifact 通道并用了 token 时，提醒吊销。
 
 ## 2. 更新 SKILLOS（只刷新归档）
 
@@ -138,18 +147,19 @@ SKILLOS_GH_TOKEN=<token> python scripts/release_pull.py --jobs 8 # 并发连接�
 归档来自未推送的本地提交 → 停下报告；只是落后 → 直接重拉。
 
 ```bash
-SKILLOS_GH_TOKEN=<token> python scripts/release_pull.py
+python scripts/release_pull.py        # 免 token
 ```
 
-自动取最新成功 run；`vendor/dist/` 只留最新。若用户指名某次 run，加 `--run <id>`。
+自动取最新 Release；`vendor/dist/` 只留最新。若指名某个版本，加 `--tag vX.Y.Z`。
 拉完仍要过 §1.6 验证 + 交付前审查（`audit_skillos.py`）。
 
-## 3. token 安全约定（不可违）
+## 3. token 安全约定（回退 artifact 通道时适用）
 
 - 只经 `SKILLOS_GH_TOKEN` 环境变量或 `--token-stdin` 管道进入进程
 - **不写入任何文件 / 项目配置 / 命令历史 / 日志**；不在回复中回显
 - 用最小权限：仅 SkillOS 仓库 + Actions Read-only + 7 天过期；用完建议吊销
 - 仓库内任何文件出现 `github_pat_` 字样都是事故，立即删除并吊销
+- **没有 token 不等于可以停下**：先确认该 tag 有没有 Release 附件（正常发版都有）
 
 ## 4. 踩坑速查
 
@@ -157,12 +167,13 @@ SKILLOS_GH_TOKEN=<token> python scripts/release_pull.py
 |---|---|
 | Windows runner stdout cp1252，中文日志秒崩 | build.py/smoke.py 已加 UTF-8 reconfigure；workflow 已设 PYTHONUTF8=1 |
 | Nuitka 产物名随平台变（cp311 vs cpython-311） | build.py ABI 校验两种写法都认 |
-| artifact zip 两层结构 | 脚本只取内层交付 zip |
+| artifact zip 两层结构 | Release 通道直取交付 zip；artifact 通道脚本只取内层 |
 | 归档区旧文件导致解压静默合并 | 脚本先清后写；手动操作先 mv 挪走旧的（勿 rm -rf 大目录） |
 | 依赖不封顶 → CI 没改代码也红 | nuitka `<5` / ruff `<0.17` / mcp `<2` 已锁；新依赖必须给上限 |
 | pip 直连超时 | 一律清华源 `-i https://pypi.tuna.tsinghua.edu.cn/simple` |
 | macOS runner 标签 | `macos-15`(arm64) / `macos-15-intel`(x64)；`macos-13` 已退役别用 |
 | 匿名访问 Actions | artifact 下载必须 token；job 列表与 annotations API 匿名可读 |
+| **拉产物卡在「要一个 token」** | Release assets 匿名可下 → 正常发版零凭据；只有早期 run 才回退 artifact |
 | 单连接下载被 CDN 限速（390MB 要 2 小时） | `release_pull.py` 默认 5 并发（`--jobs 8` 更快）；进度看 `%TEMP%/skillos-release-*/`，**归档区在全部下完前不会变** |
 | 远程有本地不知道的提交，照旧基于旧代码发版 | §1.0 `git fetch` + 区间比对；落后/分叉一律停下问用户 |
 | 待发 tag 已被占用 / 低于远程最高 tag（回退） | §1.0 `git ls-remote --tags origin`；停下问「覆盖还是换号」 |

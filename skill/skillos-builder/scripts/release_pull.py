@@ -1,27 +1,37 @@
 #!/usr/bin/env python3
-"""release_pull.py —— 从 GitHub Actions 拉取 SkillOS 发行产物，归位 vendor/dist/
+"""release_pull.py —— 拉取 SkillOS 发行产物，归位 vendor/dist/
 
 归属：skillos-builder skill（触发词「创建SKILLOS」「更新SKILLOS」）。
 归档目标默认为同级产品包的 `<script>/../../skillos/vendor/dist/`，**只保留最新版本**
 （拉取前自动清空旧内容）。
 
-用法（token 绝不写盘、不进日志、不打印）：
+两条通道（默认 auto：先 Release，失败再回退 artifact）：
 
-    SKILLOS_GH_TOKEN=github_pat_xxx python scripts/release_pull.py            # 拉最新成功 run
-    SKILLOS_GH_TOKEN=xxx python scripts/release_pull.py --run 38063781796     # 指定 run id
-    SKILLOS_GH_TOKEN=xxx python scripts/release_pull.py --list                # 只看清单，不下载
-    SKILLOS_GH_TOKEN=xxx python scripts/release_pull.py --jobs 8              # 并发连接数（默认 5）
-    echo <token> | python scripts/release_pull.py --token-stdin               # 管道传 token
+  ① Release（**免 token**，公开仓库匿名可下载 —— 正常发版走这条）::
+
+        python scripts/release_pull.py                     # 最新一次发行
+        python scripts/release_pull.py --tag v0.2.2        # 指定版本
+        python scripts/release_pull.py --list              # 只看清单，不下载
+        python scripts/release_pull.py --jobs 8            # 并发连接数（默认 5）
+
+  ② Actions artifact（**必须 token**；只有早期没挂 Release 的 run 才用）::
+
+        SKILLOS_GH_TOKEN=github_pat_xxx python scripts/release_pull.py --source artifact
+        SKILLOS_GH_TOKEN=xxx python scripts/release_pull.py --run 38063781796
+        echo <token> | python scripts/release_pull.py --source artifact --token-stdin
+
+为什么优先 Release：artifact 下载**强制要 token**（公开仓库也 401），把「拉产物」
+这一步永远卡在人工提供凭据上；Release assets 匿名可取、且不受 14 天保留期限制。
 
 行为：
-  1. 选 run：release.yml 最近一次 success（或 --run 指定）
-  2. **并发**下载 4 个 skillos-<平台> artifact + web-dist（默认 5 连接）
-  3. 平台 artifact 内含两层：交付 zip（skillos-<版本>-<平台>.zip）+ 解包目录；
-     只取**交付 zip** 存入归档区；web-dist 原样存为 web-dist.zip
+  1. 选版本：Release 列表最新非预发布（或 --tag / --run 指定）
+  2. **并发**下载 4 个 `skillos-<版本>-<平台>.zip` + `web-dist.zip`（默认 5 连接）
+  3. Release 通道：asset 即交付 zip，直接归档；
+     artifact 通道：内层还有一层目录结构，只取其中交付 zip
   4. 清掉归档区旧内容（只有最新版本）
-  5. 写 RELEASE-INFO.json（版本 / run / commit / sha256 清单），供事后核验
+  5. 写 RELEASE-INFO.json（版本 / 来源 / run / commit / sha256 清单），供事后核验
 
-为什么并发：artifact 下载是 302 → Azure 签名 CDN，**单连接常被限速**。实测同一批
+为什么并发：下载是 302 → Azure 签名 CDN，**单连接常被限速**。实测同一批
 390MB（4 平台 + web-dist），单线程只有 51 KB/s（约 2 小时），并发后恢复数倍。
 下载全部成功才会动归档区 —— 中途失败不会留下半套归档。
 
@@ -46,14 +56,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 API = "https://api.github.com"
+WEB = "https://github.com"
 WORKFLOW = "release.yml"
-PLATFORM_ARTIFACTS = {
-    "skillos-win-x64", "skillos-mac-arm64", "skillos-mac-x64", "skillos-linux-x64",
-}
+PLATFORMS = ("win-x64", "mac-arm64", "mac-x64", "linux-x64")
+PLATFORM_ARTIFACTS = {f"skillos-{p}" for p in PLATFORMS}
 WEB_ARTIFACT = "web-dist"
+WEB_ASSET = "web-dist.zip"
 DELIVERY_ZIP_RE = re.compile(
     r"^skillos-(\d+\.\d+\.\d+)-(win-x64|mac-arm64|mac-x64|linux-x64)\.zip$"
 )
+TAG_RE = re.compile(r"^v(\d+\.\d+\.\d+)$")
 
 
 def default_target() -> Path:
@@ -75,39 +87,73 @@ def die(msg: str, code: int = 2) -> None:
     raise SystemExit(code)
 
 
-def get_token(args: argparse.Namespace) -> str:
+def read_token(args: argparse.Namespace) -> str:
+    """token 只在内存里；为空是常态（Release 通道不需要）。"""
     tok = os.environ.get("SKILLOS_GH_TOKEN", "").strip()
     if not tok and args.token_stdin:
         tok = sys.stdin.readline().strip()
-    if not tok:
-        die(
-            "缺少 token。请生成 fine-grained token（仅 SkillOS 仓库、"
-            "Permissions → Actions → Read-only、7 天过期），"
-            "然后 SKILLOS_GH_TOKEN=<token> 传入或 --token-stdin 管道传入。"
-            "token 只在本次进程内使用，不落盘；用完建议吊销。",
-        )
     return tok
 
 
-def api_json(url: str, token: str) -> dict:
-    req = urllib.request.Request(
-        url, headers={
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/vnd.github+json",
-            "User-Agent": "skillos-release-pull",
-        },
+def require_token(token: str) -> str:
+    if token:
+        return token
+    die(
+        "artifact 通道必须 token。**正常发版不需要**：去掉 --source artifact 即走 Release"
+        "（公开仓库匿名可下载）。确需拉早期 artifact 时，生成 fine-grained token"
+        "（仅 SkillOS 仓库、Permissions → Actions → Read-only、7 天过期），"
+        "用 SKILLOS_GH_TOKEN=<token> 或 --token-stdin 传入。token 只在本次进程内使用，"
+        "不落盘；用完建议吊销。",
     )
+    return token  # pragma: no cover —— die() 不会返回
+
+
+def http_json(url: str, token: str | None = None, soft: bool = False) -> dict:
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": "skillos-release-pull"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=60) as r:
             return json.load(r)
     except Exception as e:  # noqa: BLE001
+        if soft:
+            print(f"[release_pull] 警告：{url} → {type(e).__name__}: {e}（继续）", file=sys.stderr)
+            return {}
         die(f"请求失败 {url} → {type(e).__name__}: {e}")
+        return {}
 
 
-def api_download(url: str, token: str, dest: Path) -> None:
-    """artifact 下载是 302 → Azure 签名 CDN。必须两段式：带 token 拿 Location，
-    再**不带任何鉴权头**取 CDN —— 否则 Bearer 头跟着跳过去会导致 CDN 401。"""
+def pick_release(repo: str, tag: str | None, token: str | None) -> dict | None:
+    """挑一个已发布的 Release（非 draft / 非 prerelease）。没有就返回 None。"""
+    rels = http_json(f"{API}/repos/{repo}/releases?per_page=30", token)
+    if not isinstance(rels, list):
+        return None
+    items = [r for r in rels if not r.get("draft") and not r.get("prerelease")]
+    if tag:
+        for r in items:
+            if r.get("tag_name") == tag:
+                return r
+        return None
+    for r in items:
+        if TAG_RE.fullmatch(r.get("tag_name", "")):
+            return r
+    return None
+
+
+def download(url: str, dest: Path, token: str | None, kind: str) -> None:
+    """kind=artifact：两段式（带 token 拿 302 Location，再**不带鉴权头**取 CDN）。
+    kind=release：普通跟随重定向（匿名单，任何鉴权头都会被 CDN 拒）。"""
     import urllib.error
+
+    if kind == "release":
+        req = urllib.request.Request(url, headers={"User-Agent": "skillos-release-pull"})
+        try:
+            with urllib.request.urlopen(req, timeout=900) as r, open(dest, "wb") as f:
+                shutil.copyfileobj(r, f)
+        except Exception as e:  # noqa: BLE001
+            die(f"下载失败 {url} → {type(e).__name__}: {e}")
+        return
 
     class _NoRedirect(urllib.request.HTTPRedirectHandler):
         def redirect_request(self, req, fp, code, msg, headers, newurl):
@@ -115,10 +161,8 @@ def api_download(url: str, token: str, dest: Path) -> None:
 
     opener = urllib.request.build_opener(_NoRedirect)
     req = urllib.request.Request(
-        url, headers={
-            "Authorization": f"Bearer {token}",
-            "User-Agent": "skillos-release-pull",
-        },
+        url,
+        headers={"Authorization": f"Bearer {token}", "User-Agent": "skillos-release-pull"},
     )
     try:
         try:
@@ -143,11 +187,11 @@ def api_download(url: str, token: str, dest: Path) -> None:
 
 def pick_run(repo: str, token: str, run_id: int | None) -> dict:
     if run_id:
-        run = api_json(f"{API}/repos/{repo}/actions/runs/{run_id}", token)
+        run = http_json(f"{API}/repos/{repo}/actions/runs/{run_id}", token)
         if run.get("conclusion") != "success":
             die(f"run {run_id} 状态为 {run.get('conclusion')}，不是 success —— 不拉失败的产物。")
         return run
-    runs = api_json(
+    runs = http_json(
         f"{API}/repos/{repo}/actions/workflows/{WORKFLOW}/runs?status=success&per_page=10", token,
     )
     items = runs.get("workflow_runs") or []
@@ -164,14 +208,30 @@ def sha256_file(p: Path) -> str:
     return h.hexdigest()
 
 
+def commit_from_zip(zip_path: Path) -> str:
+    """从交付 zip 内的 BUILD-INFO.json 取 CI 记录的 commit（Release 通道没有 run id）。"""
+    try:
+        with zipfile.ZipFile(zip_path) as z:
+            for n in z.namelist():
+                if n.endswith("BUILD-INFO.json"):
+                    return json.loads(z.read(n)).get("git_commit", "")
+    except Exception:  # noqa: BLE001
+        return ""
+    return ""
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     ap.add_argument("--repo", default="cadentang/SkillOS")
+    ap.add_argument("--tag", default=None,
+                    help="指定发行 tag（如 v0.2.2）；默认取最新 Release")
     ap.add_argument("--run", type=int, default=None,
-                    help="指定 run id；缺省取最新成功的 release run")
-    ap.add_argument("--list", action="store_true", help="只列出将拉取的 artifact，不下载")
+                    help="指定 run id（强制走 artifact 通道，需要 token）")
+    ap.add_argument("--source", choices=["auto", "release", "artifact"], default="auto",
+                    help="产物来源：auto（默认，先 Release 再回退 artifact）/ release / artifact")
+    ap.add_argument("--list", action="store_true", help="只列出将拉取的文件，不下载")
     ap.add_argument("--jobs", type=int, default=5,
                     help="并发下载连接数（默认 5；单连接被 CDN 限速时调大更快，1 = 串行）")
     ap.add_argument("--token-stdin", action="store_true", help="从 stdin 第一行读 token")
@@ -179,83 +239,145 @@ def main() -> None:
                     help="归档目录（默认 <repo>/skill/skillos/vendor/dist/）")
     args = ap.parse_args()
 
-    token = get_token(args)
-    run = pick_run(args.repo, token, args.run)
-    rid, branch, sha = run["id"], run.get("head_branch", ""), run.get("head_sha", "")[:12]
-    tag = branch if re.fullmatch(r"v\d+\.\d+\.\d+", branch) else ""
-    print(f"run {rid} | {branch} | commit {sha} | {run.get('created_at')}")
-
-    arts = api_json(f"{API}/repos/{args.repo}/actions/runs/{rid}/artifacts?per_page=50", token)
-    allowed = PLATFORM_ARTIFACTS | {WEB_ARTIFACT}
-    wanted = [a for a in arts.get("artifacts", []) if a["name"] in allowed]
-    found = {a["name"] for a in wanted}
-    missing = allowed - found
-    if missing:
-        die(f"run {rid} 缺 artifact：{sorted(missing)} —— 不做半套归档。")
-    for a in wanted:
-        print(f"  {a['name']:<20} {a['size_in_bytes']:>12,} bytes  id={a['id']}")
-
+    token = read_token(args)
     out_dir = Path(args.target) if args.target else default_target()
+
+    source = args.source
+    if args.run:
+        source = "artifact"          # 指定 run 只能走 artifact
+    rel: dict | None = None
+    if source in ("auto", "release"):
+        rel = pick_release(args.repo, args.tag, token or None)
+        if rel:
+            source = "release"
+        elif source == "release":
+            die(f"仓库 {args.repo} 没有匹配 {args.tag or '最新'} 的 Release。"
+                "确认该 tag 的 release.yml 里 publish job 是否跑过。")
+        else:
+            source = "artifact"
+            print("[release_pull] 未找到 Release 附件 → 回退 artifact 通道（需要 token）")
+    if source == "artifact":
+        token = require_token(token)
+
+    # ---------------- 组装下载清单 ----------------
+    items: list[dict] = []
+    version = ""
+    tag = ""
+    run: dict = {}
+    release_url = ""
+
+    if source == "release":
+        rel = rel or {}
+        tag = rel.get("tag_name", "")
+        release_url = rel.get("html_url", "")
+        m = TAG_RE.fullmatch(tag)
+        if not m:
+            die(f"Release tag 形态异常：{tag}")
+        version = m.group(1)
+        by_name = {a["name"]: a for a in (rel.get("assets") or [])}
+        for plat in PLATFORMS:
+            nm = f"skillos-{version}-{plat}.zip"
+            a = by_name.get(nm)
+            if not a:
+                have = sorted(n for n in by_name if DELIVERY_ZIP_RE.fullmatch(n))
+                die(f"Release {tag} 缺 {nm}；现有交付 zip：{have}")
+            items.append({"name": nm, "url": a["browser_download_url"],
+                          "size": a["size"], "kind": "release"})
+        wa = by_name.get(WEB_ASSET)
+        if not wa:
+            die(f"Release {tag} 缺 {WEB_ASSET}")
+        items.append({"name": WEB_ASSET, "url": wa["browser_download_url"],
+                      "size": wa["size"], "kind": "release"})
+        # run 溯源（公开仓库匿名可读；拿不到不影响归档）
+        rr = http_json(f"{API}/repos/{args.repo}/actions/workflows/{WORKFLOW}"
+                       f"/runs?branch={tag}&per_page=1", token or None, soft=True)
+        hits = rr.get("workflow_runs") or []
+        run = hits[0] if hits else {}
+        print(f"Release {tag} | {len(items)} 个附件 | {release_url}")
+    else:
+        run = pick_run(args.repo, token, args.run)
+        branch = run.get("head_branch", "")
+        tag = branch if TAG_RE.fullmatch(branch) else ""
+        arts = http_json(
+            f"{API}/repos/{args.repo}/actions/runs/{run['id']}/artifacts?per_page=50", token,
+        )
+        allowed = PLATFORM_ARTIFACTS | {WEB_ARTIFACT}
+        wanted = [a for a in arts.get("artifacts", []) if a["name"] in allowed]
+        missing = allowed - {a["name"] for a in wanted}
+        if missing:
+            die(f"run {run['id']} 缺 artifact：{sorted(missing)} —— 不做半套归档。")
+        for a in wanted:
+            items.append({
+                "name": a["name"],
+                "url": f"{API}/repos/{args.repo}/actions/artifacts/{a['id']}/zip",
+                "size": a["size_in_bytes"], "kind": "artifact",
+            })
+        print(f"run {run['id']} | {branch} | commit {run.get('head_sha', '')[:12]}"
+              f" | {run.get('created_at')}")
+
+    for it in items:
+        print(f"  {it['name']:<24} {it['size']:>12,} bytes  [{it['kind']}]")
+
     if args.list:
         print(f"[dry] 将写入 {out_dir}（先清旧，只留最新）")
         return
 
     # --- 下载到临时目录，全部成功后才动归档区 ---
-    # 并发下载：artifact 走 302 → Azure 签名 CDN，**单连接常被限速**
+    # 并发下载：走 302 → Azure 签名 CDN，**单连接常被限速**
     # （实测同一批 390MB：单线程 51 KB/s ≈ 2 小时）。失败不落半套归档。
     tmp = Path(tempfile.mkdtemp(prefix="skillos-release-"))
     staged: dict[str, Path] = {}
-    version: str | None = None
-    jobs = max(1, min(args.jobs, len(wanted)))
-    print(f"并发下载 {len(wanted)} 个 artifact（{jobs} 连接）…")
+    jobs = max(1, min(args.jobs, len(items)))
+    print(f"并发下载 {len(items)} 个文件（{jobs} 连接）…")
     try:
         raws: dict[str, Path] = {}
         t0 = time.monotonic()
         with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
             futs = {
-                pool.submit(
-                    api_download,
-                    f"{API}/repos/{args.repo}/actions/artifacts/{a['id']}/zip",
-                    token,
-                    tmp / f"{a['name']}.artifact.zip",
-                ): a
-                for a in wanted
+                pool.submit(download, it["url"], tmp / f"{it['name']}.raw",
+                            token or None, it["kind"]): it
+                for it in items
             }
             errors: list[str] = []
             for fut in concurrent.futures.as_completed(futs):
-                a = futs[fut]
+                it = futs[fut]
                 try:
                     fut.result()
                 except BaseException as e:  # die() 抛的是 SystemExit，一并收集
-                    errors.append(f"{a['name']}: {e}")
+                    errors.append(f"{it['name']}: {e}")
                     continue
-                p = tmp / f"{a['name']}.artifact.zip"
-                raws[a["name"]] = p
-                print(f"  ✓ {a['name']:<20} {p.stat().st_size / 1048576:7.1f} MB"
+                p = tmp / f"{it['name']}.raw"
+                raws[it["name"]] = p
+                print(f"  ✓ {it['name']:<24} {p.stat().st_size / 1048576:7.1f} MB"
                       f"  ({time.monotonic() - t0:.0f}s)")
             if errors:
                 die("下载失败：\n      " + "\n      ".join(errors))
 
-        # 解包（本地 IO，顺序做。平台 artifact 是两层结构，见 references/release.md）
-        for a in wanted:
-            raw = raws[a["name"]]
-            if a["name"] == WEB_ARTIFACT:
-                staged["web-dist.zip"] = raw
+        for it in items:
+            raw = raws[it["name"]]
+            if it["kind"] == "release":
+                staged[it["name"]] = raw       # Release asset 本身就是交付 zip
+                continue
+            if it["name"] == WEB_ARTIFACT:
+                staged[WEB_ASSET] = raw
                 continue
             with zipfile.ZipFile(raw) as z:
                 members = [n for n in z.namelist() if DELIVERY_ZIP_RE.match(Path(n).name)]
                 if len(members) != 1:
-                    die(f"{a['name']} artifact 内交付 zip 数量异常：{members}")
+                    die(f"{it['name']} artifact 内交付 zip 数量异常：{members}")
                 member = members[0]
-                ver = DELIVERY_ZIP_RE.match(Path(member).name).group(1)
-                version = version or ver
-                if ver != version:
-                    die(f"版本不一致：{member} 里是 {ver}，此前是 {version}")
                 dest = tmp / Path(member).name
                 dest.write_bytes(z.read(member))
                 staged[dest.name] = dest
 
-        if version and tag and tag.lstrip("v") != version:
+        # 版本一致性：4 个交付 zip 的版本号必须一致，且与 tag 对齐
+        vers = {DELIVERY_ZIP_RE.fullmatch(n).group(1)
+                for n in staged if DELIVERY_ZIP_RE.fullmatch(n)}
+        if len(vers) != 1:
+            die(f"交付 zip 版本不一致：{sorted(vers)}")
+        version = vers.pop()
+        tag = tag or f"v{version}"
+        if tag.lstrip("v") != version:
             die(f"tag {tag} 与交付 zip 版本 {version} 不一致 —— 拒绝归档。")
 
         # --- 全部就绪：清旧、落新（归档区只留最新版本） ---
@@ -266,12 +388,20 @@ def main() -> None:
             else:
                 old.unlink()
 
+        head_sha = (run.get("head_sha") or "")[:12]
+        if not head_sha:                      # Release 通道可能查不到 run，退回包内 BUILD-INFO
+            for nm, p in sorted(staged.items()):
+                if DELIVERY_ZIP_RE.fullmatch(nm):
+                    head_sha = commit_from_zip(p)[:12]
+                    break
         info = {
             "version": version,
             "tag": tag,
-            "run_id": rid,
+            "source": source,
+            "release_url": release_url,
+            "run_id": run.get("id"),
             "run_url": run.get("html_url", ""),
-            "head_sha": sha,
+            "head_sha": head_sha,
             "fetched_at": now_iso(),
             "files": {},
         }

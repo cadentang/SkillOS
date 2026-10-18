@@ -1,7 +1,7 @@
 ---
 name: skillos-builder
-description: 制作 SKILLOS 发行包的打包流水线。当用户说「创建SKILLOS」「更新SKILLOS」时使用：核对本地与远程版本是否对齐（不对齐必须让用户拍板）→ 本地构建 → GitHub Actions CI 四平台编译 → 拉取四平台产物与 web 前端 → 归档到 skill/skillos/vendor/dist/（只保留最新版本）→ 校验与冒烟。触发词：创建SKILLOS、更新SKILLOS、打包SKILLOS、SKILLOS发新版、构建SKILLOS。token 只经环境变量/stdin 一次性传入，不落盘、不进日志。
-version: 0.2.0
+description: 制作 SKILLOS 发行包的打包流水线。当用户说「创建SKILLOS」「更新SKILLOS」时使用：核对本地与远程版本是否对齐（不对齐必须让用户拍板）→ 本地构建 → GitHub Actions CI 四平台编译 → 从该 tag 的 GitHub Release 拉取四平台产物与 web 前端（免 token）→ 归档到 skill/skillos/vendor/dist/（只保留最新版本）→ 校验与冒烟。触发词：创建SKILLOS、更新SKILLOS、打包SKILLOS、SKILLOS发新版、构建SKILLOS。产物默认走 Release 免 token；仅回退 artifact 通道时才经环境变量/stdin 传 token，不落盘、不进日志。
+version: 0.3.0
 agent_created: true
 ---
 
@@ -29,9 +29,12 @@ agent_created: true
   且 **git push 必须在沙箱外跑**（沙箱读不了 `~/.ssh/known_hosts`，报 `Host key verification failed`）
 - CI：`.github/workflows/release.yml`，**打 tag `vX.Y.Z` 才触发**，四平台矩阵
   （win-x64 / linux-x64 / mac-arm64 / mac-x64）+ web，全程约 3-6 分钟
-- 产物：run 页 Artifacts 区，4 个 `skillos-<平台>` + `web-dist`，**14 天后过期**
-- **Actions artifact 下载必须带 token（公开仓库也 401）** → 每次执行让用户现场生成
-  fine-grained token（仅 SkillOS 仓库、Actions: Read-only、7 天过期），走环境变量或 stdin 传入
+- 产物：该 tag 的 **GitHub Release 附件**（4 个 `skillos-<版本>-<平台>.zip` + `web-dist.zip`，
+  匿名可下）；run 页的 Artifacts 是同一批东西，**14 天后过期**
+- **Actions artifact 下载必须带 token（公开仓库也 401）**，所以 CI 里加了 `publish` job ——
+  产物同时挂到 Release，拉产物因此**不再依赖任何人工凭据**。只有回退 artifact 通道
+  （`--source artifact` / `--run`）才需要现场生成 fine-grained token（仅 SkillOS 仓库、
+  Actions: Read-only、7 天过期），走环境变量或 stdin 传入
 - 完整踩坑清单（10 条）在 SkillOS 仓库 `build/CI-RELEASE.md`；本包 `references/release.md` 是操作视角的手册
 
 ## 流程 A · 创建（新版本全流程）
@@ -121,16 +124,20 @@ git push origin vX.Y.Z
 盯 `https://github.com/cadentang/SkillOS/actions`。判断技巧：job 列表 API 匿名可读，
 **某 step 耗时 0 秒 = 没进正题就死了**；四平台 `Compile` 全 success 才算绿。
 
-**第 5 步 · 拉产物归位**（本包脚本，自动清旧、只留最新）
+**第 5 步 · 拉产物归位**（本包脚本，免 token，自动清旧、只留最新）
 
 ```bash
-SKILLOS_GH_TOKEN=<用户刚生成的 token> python scripts/release_pull.py            # 最新成功 run
-SKILLOS_GH_TOKEN=xxx python scripts/release_pull.py --run <run_id>             # 指定 run
-SKILLOS_GH_TOKEN=xxx python scripts/release_pull.py --list                     # 先看清单不下载
-SKILLOS_GH_TOKEN=xxx python scripts/release_pull.py --jobs 8                   # 并发连接数（默认 5）
+python scripts/release_pull.py                     # 最新一次发行（Release 通道，免 token）
+python scripts/release_pull.py --tag v0.2.2        # 指定版本
+python scripts/release_pull.py --list              # 先看清单不下载
+python scripts/release_pull.py --jobs 8            # 并发连接数（默认 5）
 ```
 
-> 5 个 artifact 共约 390MB，**脚本默认 5 并发** —— 单连接会被 CDN 限速（实测 51 KB/s ≈ 2 小时，
+> **默认走 GitHub Release，不需要 token** —— CI 的 `publish` job 已把 5 个交付 zip 挂到该 tag
+> 的 Release，公开仓库匿名可下。artifact 通道（`--source artifact`）只在「早期没挂 Release
+> 的 run」才用，那时才需要 fine-grained token。
+>
+> 5 个文件共约 390MB，**脚本默认 5 并发** —— 单连接会被 CDN 限速（实测 51 KB/s ≈ 2 小时，
 > 并发后 700 KB/s ≈ 10 分钟）。下载全部成功才动归档区，中途失败不留半套。
 
 **第 6 步 · 交付前审查（必跑，不过不交付）**
@@ -156,8 +163,8 @@ CPython + runtime/web）/ runtime 下无 .py 泄漏 / 凭据扫描 / 与 docs �
 
 **第 7 步 · 冒烟 + 汇报**
 - 本机是 Windows：用仓库 `build/smoke.py --dist <解包后的 win 产物>` 跑四重自证（42 项断言）
-- 汇报：版本 / run 链接 / 各平台产物大小 / vendor/dist 落位 / **审查结论（含 warn 与决策项）** / 冒烟结果
-- **提醒用户吊销刚才的 token**（它在对话里出现过）
+- 汇报：版本 / run 或 Release 链接 / 各平台产物大小 / vendor/dist 落位 / **审查结论（含 warn 与决策项）** / 冒烟结果
+- 只在**回退 artifact 通道**并用了 token 时，提醒用户吊销
 
 ## 流程 B · 更新（只刷新产物归档）
 
@@ -166,11 +173,11 @@ CPython + runtime/web）/ runtime 下无 .py 泄漏 / 凭据扫描 / 与 docs �
 若只落后 → 重拉即可，不必问。
 
 ```bash
-SKILLOS_GH_TOKEN=xxx python scripts/release_pull.py
+python scripts/release_pull.py        # 免 token，走最新 Release
 ```
 
-拉「最新一次成功的 release run」，`vendor/dist/` 旧内容自动清掉，只留最新。
-拉到之后仍要跑**第 6 步交付前审查**（第 5 步的验证见 `references/release.md` §1.6）。
+拉「最新一次发行的 Release 附件」，`vendor/dist/` 旧内容自动清掉，只留最新。
+之后仍要跑**第 6 步交付前审查**（第 5 步的验证见 `references/release.md` §1.6）。
 
 ## 落位规约（产物去哪）
 
@@ -178,12 +185,12 @@ SKILLOS_GH_TOKEN=xxx python scripts/release_pull.py
 skill/skillos/vendor/
 ├── <平台>/python/ …            # 构建期便携运行时（build.py 注入，与本 skill 无关，别动）
 └── dist/                       # ← 本 skill 的归档区（gitignored，只保留最新版本）
-    ├── skillos-<版本>-win-x64.zip      # 交付 zip（从 artifact 两层结构中取内层）
+    ├── skillos-<版本>-win-x64.zip      # 交付 zip（Release 附件直取；artifact 通道取内层）
     ├── skillos-<版本>-mac-arm64.zip
     ├── skillos-<版本>-mac-x64.zip
     ├── skillos-<版本>-linux-x64.zip
     ├── web-dist.zip                    # 前端原始包
-    └── RELEASE-INFO.json               # 版本/run/commit/sha256 台账
+    └── RELEASE-INFO.json               # 台账：版本/tag/source/run/commit/sha256
 ```
 
 ## 六条铁律
@@ -191,7 +198,9 @@ skill/skillos/vendor/
 1. **版本不对齐不发版**：第 0 步核对（本地 HEAD / 远程 main / 待发 tag / 已有归档）未对齐时
    **一律停下让用户拍板**；禁止自行 `pull` / `rebase` / `push -f` / 换版本号 —— 这些都会改写
    别人看到的历史。
-2. **token 不落盘**：只走环境变量/stdin；不写进任何文件、命令历史、日志；用完提醒吊销。
+2. **产物优先走 Release（免 token）**：CI 的 `publish` job 负责把交付 zip 挂到 Release；
+   只有回退 artifact 通道时才需要 token，且只经环境变量/stdin 进进程，不落盘、不进日志。**不许**
+   因为没有 token 就把「拉产物」推回给用户——先确认 Release 附件在不在。
 3. **CI 没全绿不拉产物**；拉完不验 BUILD-INFO 不算完成。
 4. **vendor/dist 只留最新**：`release_pull.py` 拉取前自动清旧——不许手动攒多版本。
 5. **不污染 `skill/skillos/` 产品定义**：本 skill 的一切改动只进 `skillos-builder/` 和
