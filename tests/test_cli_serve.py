@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 from fastapi.testclient import TestClient
+from typer.main import get_command
 from typer.testing import CliRunner
 
 from skillos.api.main import create_app
@@ -23,14 +24,17 @@ SECRET = "test-secret"
 def test_serve_is_registered_with_flags() -> None:
     r = CliRunner().invoke(app, ["serve", "--help"])
     assert r.exit_code == 0, r.output
-    for flag in ("--host", "--port", "--reload", "--dev", "--open", "--db-url"):
-        assert flag in r.output, flag
+    # 断言命令对象，不断言渲染文本：typer/rich 按终端宽度排版，80 列下
+    # `--host` 可能被折行/省略（2026-10-18 CI 实测：本地过、CI 四平台红）。
+    params = {p.name for p in get_command(app).commands["serve"].params}
+    assert {"host", "port", "reload", "dev", "open_browser", "db_url"} <= params
 
 
 def test_serve_appears_in_top_level_help() -> None:
     r = CliRunner().invoke(app, ["--help"])
     assert r.exit_code == 0
-    assert "serve" in r.output
+    # 同上：help 文本受渲染宽度影响，注册表才是事实源。
+    assert "serve" in get_command(app).commands
 
 
 def test_dev_sentinel_disables_spa_mount(tmp_path, monkeypatch) -> None:
