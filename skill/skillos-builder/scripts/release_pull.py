@@ -12,7 +12,7 @@
         python scripts/release_pull.py                     # 最新一次发行
         python scripts/release_pull.py --tag v0.2.2        # 指定版本
         python scripts/release_pull.py --list              # 只看清单，不下载
-        python scripts/release_pull.py --jobs 8            # 并发连接数（默认 5）
+        python scripts/release_pull.py --jobs 8            # 并发连接数（默认 3）
 
   ② Actions artifact（**必须 token**；只有早期没挂 Release 的 run 才用）::
 
@@ -141,48 +141,73 @@ def pick_release(repo: str, tag: str | None, token: str | None) -> dict | None:
     return None
 
 
-def download(url: str, dest: Path, token: str | None, kind: str) -> None:
+def download(url: str, dest: Path, token: str | None, kind: str, retries: int = 3) -> None:
     """kind=artifact：两段式（带 token 拿 302 Location，再**不带鉴权头**取 CDN）。
-    kind=release：普通跟随重定向（匿名单，任何鉴权头都会被 CDN 拒）。"""
+    kind=release：普通跟随重定向（匿名单，任何鉴权头都会被 CDN 拒）。
+
+    两者都带**续传重试**：GitHub 的 CDN 会在大文件慢速传输时直接掐连接
+    （实测 RemoteDisconnected），此时用 Range 从断点接着下，不必从头再来。
+    """
     import urllib.error
 
-    if kind == "release":
-        req = urllib.request.Request(url, headers={"User-Agent": "skillos-release-pull"})
+    last = ""
+    for attempt in range(1, retries + 1):
+        have = dest.stat().st_size if dest.exists() else 0
         try:
-            with urllib.request.urlopen(req, timeout=900) as r, open(dest, "wb") as f:
-                shutil.copyfileobj(r, f)
+            if kind == "release":
+                headers = {"User-Agent": "skillos-release-pull"}
+                if have:
+                    headers["Range"] = f"bytes={have}-"
+                req = urllib.request.Request(url, headers=headers)
+                with urllib.request.urlopen(req, timeout=300) as r:
+                    partial = r.status == 206 and have > 0
+                    with open(dest, "ab" if partial else "wb") as f:
+                        shutil.copyfileobj(r, f, 1 << 20)
+                return
+            _artifact_stream(url, token, dest, have)
+            return
+        except SystemExit:
+            raise
         except Exception as e:  # noqa: BLE001
-            die(f"下载失败 {url} → {type(e).__name__}: {e}")
-        return
+            last = f"{type(e).__name__}: {e}"
+            got = dest.stat().st_size if dest.exists() else 0
+            if attempt < retries:
+                print(f"    重试 {attempt}/{retries}：{last}（已有 {got / 1048576:.1f} MB，续传）",
+                      file=sys.stderr)
+                time.sleep(min(20, 4 * attempt))
+    die(f"下载失败 {url} → {last}（已重试 {retries} 次）")
+
+
+def _artifact_stream(url: str, token: str | None, dest: Path, have: int) -> None:
+    """artifact 通道：带鉴权拿 302，再裸取 CDN；带 Range 续传。"""
+    import urllib.error
 
     class _NoRedirect(urllib.request.HTTPRedirectHandler):
         def redirect_request(self, req, fp, code, msg, headers, newurl):
             return None
 
+    headers = {"Authorization": f"Bearer {token}", "User-Agent": "skillos-release-pull"}
     opener = urllib.request.build_opener(_NoRedirect)
-    req = urllib.request.Request(
-        url,
-        headers={"Authorization": f"Bearer {token}", "User-Agent": "skillos-release-pull"},
-    )
     try:
-        try:
-            resp = opener.open(req, timeout=120)
-        except urllib.error.HTTPError as e:
-            if e.code not in (301, 302, 303, 307, 308):
-                die(f"下载失败 {url} → HTTP {e.code}: {e.reason}")
-            loc = e.headers.get("Location")
-            e.close()
-            if not loc:
-                die(f"下载失败 {url} → 302 但无 Location")
-            with urllib.request.urlopen(loc, timeout=900) as r, open(dest, "wb") as f:
-                shutil.copyfileobj(r, f)
-            return
-        with resp, open(dest, "wb") as f:
-            shutil.copyfileobj(resp, f)
-    except SystemExit:
-        raise
-    except Exception as e:  # noqa: BLE001
-        die(f"下载失败 {url} → {type(e).__name__}: {e}")
+        resp = opener.open(urllib.request.Request(url, headers=headers), timeout=120)
+    except urllib.error.HTTPError as e:
+        if e.code not in (301, 302, 303, 307, 308):
+            die(f"下载失败 {url} → HTTP {e.code}: {e.reason}")
+        loc = e.headers.get("Location")
+        e.close()
+        if not loc:
+            die(f"下载失败 {url} → 302 但无 Location")
+        h2 = {"User-Agent": "skillos-release-pull"}
+        if have:
+            h2["Range"] = f"bytes={have}-"
+        with urllib.request.urlopen(urllib.request.Request(loc, headers=h2), timeout=900) as r:
+            partial = r.status == 206 and have > 0
+            with open(dest, "ab" if partial else "wb") as f:
+                shutil.copyfileobj(r, f, 1 << 20)
+        return
+    with resp:
+        with open(dest, "wb") as f:
+            shutil.copyfileobj(resp, f, 1 << 20)
 
 
 def pick_run(repo: str, token: str, run_id: int | None) -> dict:
@@ -232,8 +257,10 @@ def main() -> None:
     ap.add_argument("--source", choices=["auto", "release", "artifact"], default="auto",
                     help="产物来源：auto（默认，先 Release 再回退 artifact）/ release / artifact")
     ap.add_argument("--list", action="store_true", help="只列出将拉取的文件，不下载")
-    ap.add_argument("--jobs", type=int, default=5,
-                    help="并发下载连接数（默认 5；单连接被 CDN 限速时调大更快，1 = 串行）")
+    ap.add_argument("--jobs", type=int, default=3,
+                    help="并发下载连接数（默认 3；连接太多单条被 CDN 掐断，慢时可调到 5-8）")
+    ap.add_argument("--retries", type=int, default=3,
+                    help="单个文件失败重试次数（带 Range 续传，默认 3）")
     ap.add_argument("--token-stdin", action="store_true", help="从 stdin 第一行读 token")
     ap.add_argument("--target", default=None,
                     help="归档目录（默认 <repo>/skill/skillos/vendor/dist/）")
@@ -335,7 +362,7 @@ def main() -> None:
         with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
             futs = {
                 pool.submit(download, it["url"], tmp / f"{it['name']}.raw",
-                            token or None, it["kind"]): it
+                            token or None, it["kind"], max(1, args.retries)): it
                 for it in items
             }
             errors: list[str] = []

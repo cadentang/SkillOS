@@ -130,15 +130,16 @@ git push origin vX.Y.Z
 python scripts/release_pull.py                     # 最新一次发行（Release 通道，免 token）
 python scripts/release_pull.py --tag v0.2.2        # 指定版本
 python scripts/release_pull.py --list              # 先看清单不下载
-python scripts/release_pull.py --jobs 8            # 并发连接数（默认 5）
+python scripts/release_pull.py --jobs 5            # 并发连接数（默认 3，别超过 8）
 ```
 
 > **默认走 GitHub Release，不需要 token** —— CI 的 `publish` job 已把 5 个交付 zip 挂到该 tag
 > 的 Release，公开仓库匿名可下。artifact 通道（`--source artifact`）只在「早期没挂 Release
 > 的 run」才用，那时才需要 fine-grained token。
 >
-> 5 个文件共约 390MB，**脚本默认 5 并发** —— 单连接会被 CDN 限速（实测 51 KB/s ≈ 2 小时，
-> 并发后 700 KB/s ≈ 10 分钟）。下载全部成功才动归档区，中途失败不留半套。
+> 5 个文件共约 194MB（Release 通道只有交付 zip，比 artifact 那套小一半），**脚本默认 3 并发**
+> —— 单连接会被 CDN 限速，连接开太多反而会被直接掐断（`RemoteDisconnected`），脚本对每个文件
+> 带 **Range 续传重试**（`--retries`，默认 3）。下载全部成功才动归档区，中途失败不留半套。
 
 **第 6 步 · 交付前审查（必跑，不过不交付）**
 

@@ -104,7 +104,7 @@ curl -s "https://api.github.com/repos/cadentang/SkillOS/actions/runs/<run_id>/jo
 python scripts/release_pull.py                     # 最新 Release（无需 token）
 python scripts/release_pull.py --tag v0.2.2        # 指定版本
 python scripts/release_pull.py --list              # dry-run 只看清单
-python scripts/release_pull.py --jobs 8            # 并发连接数（默认 5）
+python scripts/release_pull.py --jobs 5            # 并发连接数（默认 3，别超过 8）
 ```
 
 脚本行为：**并发**下载 5 个文件（默认 5 连接）→ 清空 `skill/skillos/vendor/dist/` 旧内容 →
@@ -120,8 +120,10 @@ python scripts/release_pull.py --jobs 8            # 并发连接数（默认 5�
 回退时现场生成 fine-grained token：GitHub → Settings → Developer settings →
 **Fine-grained tokens** → 仅勾 `SkillOS` 仓库、**Actions: Read-only**、7 天过期；用完吊销。
 
-**为什么必须并发**：下载是 302 → Azure 签名 CDN，**单连接会被限速**。实测同一批
-390MB：单线程 51 KB/s（≈2 小时），5 并发聚合 700 KB/s（≈10 分钟）。慢的时候 `--jobs 8`。
+**为什么必须并发 + 续传**：下载走 302 → CDN，单连接被限速；但连接开太多又会被直接掐断
+（实测 5 连接并发时 linux 那个占满带宽，win/mac-x64 在 5 分钟内 `RemoteDisconnected`）。
+所以默认 **3 连接**，且每个文件失败后用 `Range` 从断点续传（`--retries`，默认 3）。
+慢的时候 `--jobs 5`，别超过 8。
 
 下载全程落系统临时目录（`%TEMP%/skillos-release-*`），**全部成功才动归档区** ——
 中途失败不会留下半套归档，也不会污染 `vendor/dist/`。
@@ -174,6 +176,6 @@ python scripts/release_pull.py        # 免 token
 | macOS runner 标签 | `macos-15`(arm64) / `macos-15-intel`(x64)；`macos-13` 已退役别用 |
 | 匿名访问 Actions | artifact 下载必须 token；job 列表与 annotations API 匿名可读 |
 | **拉产物卡在「要一个 token」** | Release assets 匿名可下 → 正常发版零凭据；只有早期 run 才回退 artifact |
-| 单连接下载被 CDN 限速（390MB 要 2 小时） | `release_pull.py` 默认 5 并发（`--jobs 8` 更快）；进度看 `%TEMP%/skillos-release-*/`，**归档区在全部下完前不会变** |
+| 下载慢 + 大文件被 CDN 掐断（`RemoteDisconnected`） | 默认 3 并发 + 每个文件 Range 续传（`--retries` 默认 3）；进度看 `%TEMP%/skillos-release-*/`，**归档区在全部下完前不会变** |
 | 远程有本地不知道的提交，照旧基于旧代码发版 | §1.0 `git fetch` + 区间比对；落后/分叉一律停下问用户 |
 | 待发 tag 已被占用 / 低于远程最高 tag（回退） | §1.0 `git ls-remote --tags origin`；停下问「覆盖还是换号」 |
