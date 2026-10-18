@@ -146,6 +146,9 @@ def check_doc_impl_consistency(pkg: Path) -> None:
         "vendor/linux-x64/", "vendor/linux-arm64/", "start.cmd", "start.sh",
         "BUILD-INFO.json",
     )
+    # vendor/dist/ 是 skillos-builder 的归档区（.gitignore + build.py 装配时整棵清掉），
+    # **从不随包分发**：文档提到它只是「手工补装可选路径」，不算承诺包内存在。
+    OPTIONAL = ("vendor/dist/", "vendor/dist")
     is_dist = (pkg / "BUILD-INFO.json").is_file()
     ref_paths = sorted(set(re.findall(
         r"`((?:references|scripts|vendor|runtime)/[A-Za-z0-9_./-]+?)`", skill_txt
@@ -154,13 +157,19 @@ def check_doc_impl_consistency(pkg: Path) -> None:
         p for p in ("manifest.json", "SKILL.md", "start.cmd", "start.sh") if f"`{p}`" in skill_txt
     ]
     absent = [p for p in ref_paths if not (pkg / p).exists()]
-    must_have = [p for p in absent if not p.startswith(DIST_ONLY)]
-    dist_only_absent = [p for p in absent if p.startswith(DIST_ONLY)]
+    optional_absent = [p for p in absent if p.startswith(OPTIONAL)]
+    must_have = [p for p in absent if not p.startswith(DIST_ONLY + OPTIONAL)]
+    dist_only_absent = [
+        p for p in absent if p.startswith(DIST_ONLY) and not p.startswith(OPTIONAL)
+    ]
     if must_have:
         rec("fail", "DOC-IMPL",
             f"SKILL.md 引用了包内不存在的文件：{must_have} ⇒ 客户按文档找不到东西")
     else:
         rec("ok", "DOC-IMPL", f"SKILL.md 引用的 {len(ref_paths)} 个包内路径全部存在")
+    if optional_absent:
+        rec("info", "DOC-IMPL",
+            f"文档提到的可选归档不随包分发（正常）：{optional_absent}")
     if dist_only_absent:
         lvl = "fail" if is_dist else "info"
         where = "发行包中缺失" if is_dist else "源码形态下正常缺失"
