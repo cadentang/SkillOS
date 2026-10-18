@@ -36,6 +36,14 @@ build/lib/
 build/bdist/
 build/*.egg-info/
 
+# 比赛分享素材（PPT 二进制 / 可再生成的逐页预览图 / 配图，约 15MB）
+# 只留 hackathon/作品介绍-SkillOS.md 入库；素材本地留存，需要归档时单独处理
+hackathon/SkillOS分享/
+hackathon/分享配图/
+hackathon/分享稿-学习群图文分享.md
+hackathon/_make_share_images.py
+hackathon/_make_dup_figure.py
+
 # AI 辅助工具的项目级数据（计划/会话状态，非交付物）
 .codebuddy/
 .workbuddy/memory/
