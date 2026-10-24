@@ -663,5 +663,111 @@ def logs() -> None:
     logs_cmd()
 
 
+# ---------------------------------------------------------------- 遥测（N-11.4 / N-11.9）
+
+telemetry_app = typer.Typer(name="telemetry", help="Runtime 会话遥测（L2，token 为估算口径）")
+path_app = typer.Typer(name="path", help="Runtime 会话路径：手动指定优先于自动探测")
+telemetry_app.add_typer(path_app, name="path")
+app.add_typer(telemetry_app, name="telemetry")
+
+
+def _telemetry_service(engine):
+    from skillos.services.telemetry_service import TelemetryService
+
+    # 部署根来自 runtimes 表：skill 关联只认「命中部署目录」的会话行（N-11.4）
+    deploy_roots = [Path(r.root_path) for r in engine.db.list_runtimes()]
+    return TelemetryService(
+        store=engine.db, settings=engine.settings,
+        home=engine.home, deploy_roots=deploy_roots,
+    )
+
+
+@telemetry_app.command("import")
+def telemetry_import(
+    runtime: str = typer.Argument("claude-code", help="Runtime 适配器名（见 adapters/telemetry）"),
+    repo: str = typer.Option(None, "--repo", help="canonical 仓库路径"),
+) -> None:
+    """导入 Runtime 本地会话日志。token 归属为**估算口径**（N-11.3），不可用于计费。"""
+    from skillos.services.telemetry_service import TelemetryPathError
+
+    engine = _make_engine(repo)
+    try:
+        result = _telemetry_service(engine).import_runtime(runtime)
+    except TelemetryPathError as exc:
+        # N-11.9④：不静默产空结果 —— 报错并列出已尝试路径
+        console.print(f"[red]✗ {exc}[/red]")
+        raise typer.Exit(EXIT_FAIL) from exc
+
+    # 立刻重算日聚合，让 token 马上可见（聚合幂等，重复跑无害）
+    engine.usage.aggregate()
+
+    table = Table(title=f"{runtime} 会话导入（token 为估算口径）")
+    table.add_column("项目")
+    table.add_column("值", justify="right")
+    table.add_row("会话文件", str(result.files))
+    table.add_row("总行数", str(result.total_lines))
+    table.add_row("usage 行", str(result.usage_lines))
+    table.add_row("跳过行（损坏/无时间戳）", str(result.skipped_lines))
+    table.add_row("归属 skill 数", str(len(result.by_skill)))
+    table.add_row("未归属 token", str(sum(result.unattributed.values())))
+    table.add_row("写入事件", str(result.events_written))
+    console.print(table)
+    for skill_id, totals in sorted(result.by_skill.items()):
+        console.print(
+            f"  {skill_id}: in={totals['tokens_in']} out={totals['tokens_out']}"
+            f" cache={totals['cache_read']}"
+        )
+    raise typer.Exit(EXIT_OK)
+
+
+@path_app.command("set")
+def telemetry_path_set(
+    runtime: str = typer.Argument(..., help="Runtime 适配器名"),
+    paths: list[str] = typer.Argument(..., help="目录列表（多实例/多 profile 可给多个）"),
+    repo: str = typer.Option(None, "--repo", help="canonical 仓库路径"),
+) -> None:
+    """手动指定会话目录（覆盖自动探测，N-11.9②③）。"""
+    engine = _make_engine(repo)
+    for raw in paths:
+        if not Path(raw).expanduser().is_dir():
+            # N-11.9④：路径不合法当场报错，不留到 import 时才炸
+            console.print(f"[red]✗ 不是目录: {raw}[/red]")
+            raise typer.Exit(EXIT_FAIL)
+    engine.settings.set_runtime_paths(runtime, [str(Path(p).expanduser()) for p in paths])
+    console.print(f"[green]✓[/green] {runtime} 手动路径 {len(paths)} 个（自动探测已跳过）")
+    raise typer.Exit(EXIT_OK)
+
+
+@path_app.command("show")
+def telemetry_path_show(
+    repo: str = typer.Option(None, "--repo", help="canonical 仓库路径"),
+) -> None:
+    """查看手动路径配置（未配置则显示为空，不代表没有自动探测）。"""
+    engine = _make_engine(repo)
+    configured = engine.settings.runtime_paths()
+    if not configured:
+        console.print("[dim]未配置手动路径（import 时走适配器自动探测）[/dim]")
+        raise typer.Exit(EXIT_OK)
+    table = Table(title="Runtime 会话路径（手动）")
+    table.add_column("runtime")
+    table.add_column("路径")
+    for key, items in sorted(configured.items()):
+        table.add_row(key, "\n".join(items))
+    console.print(table)
+    raise typer.Exit(EXIT_OK)
+
+
+@path_app.command("clear")
+def telemetry_path_clear(
+    runtime: str = typer.Argument(..., help="Runtime 适配器名"),
+    repo: str = typer.Option(None, "--repo", help="canonical 仓库路径"),
+) -> None:
+    """清除手动路径，回到自动探测。"""
+    engine = _make_engine(repo)
+    engine.settings.set_runtime_paths(runtime, [])
+    console.print(f"[green]✓[/green] 已清除 {runtime} 的手动路径")
+    raise typer.Exit(EXIT_OK)
+
+
 if __name__ == "__main__":
     app()

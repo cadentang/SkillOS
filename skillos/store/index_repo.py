@@ -83,7 +83,8 @@ class IndexStore(Protocol):
     # 调用遥测（N-11.1）：事件表是聚合的唯一事实源
     def add_usage_event(self, *, session_id: str, runtime: str, skill_id: str, op: str,
                         via: str, duration_ms: int | None, ok: bool,
-                        param_digest: str | None) -> None: ...
+                        param_digest: str | None,
+                        tokens_in: int = 0, tokens_out: int = 0) -> None: ...
     def list_usage_events(self, since: datetime) -> list[SkillUsageEvent]: ...
     def replace_usage_daily(self, since: date, rows: list[dict]) -> int: ...
     def purge_usage_events(self, before: datetime) -> int: ...
@@ -240,10 +241,12 @@ class SqliteIndexStore:
 
     def add_usage_event(self, *, session_id: str, runtime: str, skill_id: str, op: str,
                         via: str, duration_ms: int | None, ok: bool,
-                        param_digest: str | None) -> None:
+                        param_digest: str | None,
+                        tokens_in: int = 0, tokens_out: int = 0) -> None:
         self._s.add(SkillUsageEvent(
             id=_ulid(), session_id=session_id, runtime=runtime, skill_id=skill_id,
             op=op, via=via, duration_ms=duration_ms, ok=ok, param_digest=param_digest,
+            tokens_in=tokens_in, tokens_out=tokens_out,
         ))
         self._s.commit()
 

@@ -56,6 +56,13 @@ def _migrate(engine: Engine) -> None:
             ("scope", "ALTER TABLE skill_checks ADD COLUMN scope TEXT NOT NULL DEFAULT 'gate'"),
             ("value", "ALTER TABLE skill_checks ADD COLUMN value TEXT"),
         ],
+        # L2 会话适配器回填的 token 估算值（N-11.3）：落在事件行上，聚合才能重算
+        "skill_usage_events": [
+            ("tokens_in",
+             "ALTER TABLE skill_usage_events ADD COLUMN tokens_in INTEGER DEFAULT 0"),
+            ("tokens_out",
+             "ALTER TABLE skill_usage_events ADD COLUMN tokens_out INTEGER DEFAULT 0"),
+        ],
     }
     with engine.begin() as conn:
         if engine.dialect.name == "sqlite":

@@ -28,7 +28,7 @@ EXPECTED_DAILY_COLUMNS = {
 }
 EXPECTED_EVENT_COLUMNS = {
     "id", "session_id", "runtime", "skill_id", "op", "via",
-    "duration_ms", "ok", "param_digest", "at",
+    "duration_ms", "ok", "param_digest", "tokens_in", "tokens_out", "at",
 }
 
 

@@ -352,6 +352,8 @@ class SkillUsageEvent(Base):
     """本地事件表（N-11.1）：**聚合的唯一事实源**，保留 30 天滚动清理。
 
     不上云（N-01.5 / N-11.6）：`param_digest` 只是参数摘要，正文与参数永不入此表。
+    `tokens_*` 是 L2 会话适配器回填的**估算值**（N-11.3 时间片归属）——放在事件行上，
+    聚合才能被重算；若只写日聚合，下一次 recompute 会把它们抹掉（TQ-02）。
     """
 
     __tablename__ = "skill_usage_events"
@@ -369,6 +371,8 @@ class SkillUsageEvent(Base):
     duration_ms: Mapped[int | None] = mapped_column(Integer)
     ok: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     param_digest: Mapped[str | None] = mapped_column(Text)   # 参数摘要（不上云）
+    tokens_in: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    tokens_out: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
 
 

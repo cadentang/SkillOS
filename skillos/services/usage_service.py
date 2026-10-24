@@ -50,7 +50,8 @@ def param_digest(**params: Any) -> str:
 class _UsageStore(Protocol):
     def add_usage_event(self, *, session_id: str, runtime: str, skill_id: str, op: str,
                         via: str, duration_ms: int | None, ok: bool,
-                        param_digest: str | None) -> None: ...
+                        param_digest: str | None,
+                        tokens_in: int = 0, tokens_out: int = 0) -> None: ...
     def list_usage_events(self, since: datetime) -> list[Any]: ...
     def replace_usage_daily(self, since: Any, rows: list[dict]) -> int: ...
     def purge_usage_events(self, before: datetime) -> int: ...
@@ -80,6 +81,8 @@ class UsageService:
         runtime: str = "",
         session_id: str | None = None,
         digest: str | None = None,
+        tokens_in: int = 0,
+        tokens_out: int = 0,
     ) -> bool:
         """记一次调用。返回是否真的落库（关开关 / 无归属 / 非法 via 都返回 False）。
 
@@ -101,6 +104,8 @@ class UsageService:
             duration_ms=duration_ms,
             ok=ok,
             param_digest=digest,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
         )
         return True
 

@@ -30,4 +30,7 @@ skill_match:
     # Python re 不允许同名分组重复出现，故两条来源合并成一个可选前缀；
     # 没有可用部署根时改用 pattern_without_roots（只认仓库内的 skills/<slug>/）。
     pattern: "(?:{deploy_roots}|skills)/(?P<slug>[A-Za-z0-9-]+)/"
-    pattern_without_roots: "skills/(?P<slug>[A-Za-z0-9-]+)/"
+    # 回落形态要求 skills/ 前面不是路径片段：否则 "D:/x/runtimes/claude/skills/alpha/"
+    # （Windows 上还可能是 "…\claude\skills/alpha/"）也会被当成命中，
+    # 把 token 归到我们并不认识的 skill 上。反斜杠必须一起排除。
+    pattern_without_roots: '(?<![\w/.\\-])skills/(?P<slug>[A-Za-z0-9-]+)/'

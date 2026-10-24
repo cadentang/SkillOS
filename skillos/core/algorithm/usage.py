@@ -23,6 +23,8 @@ class UsageEventLike(Protocol):
     via: str
     op: str
     duration_ms: int | None
+    tokens_in: int
+    tokens_out: int
 
 
 def percentile(values: Sequence[int], q: float) -> int | None:
@@ -60,15 +62,17 @@ def aggregate_buckets(
             if isinstance(e.duration_ms, int) and not isinstance(e.duration_ms, bool)
         ]
         ops = Counter(e.op for e in group)
+        # token 来自事件行（L1 事件恒 0，L2 会话适配器回填估算值）；不在这里估算
+        tokens_in = sum(getattr(e, "tokens_in", 0) or 0 for e in group)
+        tokens_out = sum(getattr(e, "tokens_out", 0) or 0 for e in group)
         rows.append({
             "device_id": device_id,
             "skill_id": skill_id,
             "date": day,
             "via": via,
             "count": len(group),
-            # L2 未接：token 缺省 0（不猜、不估算）
-            "tokens_in": 0,
-            "tokens_out": 0,
+            "tokens_in": tokens_in,
+            "tokens_out": tokens_out,
             "duration_ms_p50": percentile(durations, 0.50),
             "duration_ms_p95": percentile(durations, 0.95),
             "by_op": json.dumps(dict(sorted(ops.items())), ensure_ascii=False),
