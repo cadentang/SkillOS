@@ -67,7 +67,11 @@ class TestPureAggregate:
 
         class E:
             def __init__(self, at, skill, via, op, dur):
-                self.at, self.skill_id, self.via, self.op, self.duration_ms = at, skill, via, op, dur
+                self.at = at
+                self.skill_id = skill
+                self.via = via
+                self.op = op
+                self.duration_ms = dur
 
         rows = aggregate_buckets([
             E(base, "a", "mcp", "get_skill", 10),
