@@ -1,7 +1,4 @@
-# Skill OS - 唐半仙 - FDE 黑客松「Skills」赛道
-
-> 草稿说明（提交前请删除本行与下面这一行）：
-> 本文件按提交模板逐项填写。**【】内为待你补的内容**，其余可直接粘贴进飞书文档。
+# Skill OS —— 唐半仙 · FDE 黑客松「Skills」赛道
 
 ---
 
@@ -12,7 +9,19 @@
 - **参赛方向**：工作与行业
 - **作品赛道**：Skills
 - **作品简介**：面向**同时使用多个 Agent Runtime**（Claude Code / Codex / WorkBuddy / 自建 agents）的开发者与团队，解决三个问题 —— **Skill 装到哪了**、**谁改的**、**过没过检查**。它把散落在四五个目录里的 Skill 收成一个带版本账本、带漂移告警、带质量门禁的本地资产库，并且让 Agent 自己也能通过 MCP 查和管。一句话：**Skill 不只是分发，还要能被验证。**
-- **作品链接**：【skillos 包（含 SKILL.md 及必要文件）/ 下载链接 —— 见文末「待补清单」】
+
+**作品链接**（Skill 包，含 `SKILL.md` 及运行所需全部文件）：
+
+| 平台 | 直接下载 | 大小 |
+|---|---|---|
+| Windows x64 | https://github.com/cadentang/SkillOS/releases/download/v0.2.3/skillos-0.2.3-win-x64.zip | 32 MB |
+| macOS（Apple 芯片） | https://github.com/cadentang/SkillOS/releases/download/v0.2.3/skillos-0.2.3-mac-arm64.zip | 47 MB |
+| macOS（Intel） | https://github.com/cadentang/SkillOS/releases/download/v0.2.3/skillos-0.2.3-mac-x64.zip | 47 MB |
+| Linux x64 | https://github.com/cadentang/SkillOS/releases/download/v0.2.3/skillos-0.2.3-linux-x64.zip | 63 MB |
+
+- 发布页（含全部附件与校验信息）：https://github.com/cadentang/SkillOS/releases/tag/v0.2.3
+- 源码仓库：https://github.com/cadentang/SkillOS
+- **包内是什么**：`SKILL.md`（Agent 入口与使用约定）+ `start.cmd` / `start.sh`（零安装启动）+ `runtime/`（编译后的引擎与 Web 控制台）+ `vendor/`（便携 CPython）+ `references/`（Agent 接入配置、排错手册）。**解压即用，不要求评委装 Python 或 Node。**
 
 ---
 
@@ -22,7 +31,9 @@
 
 **发现需求的经过：**
 
-我本机同时装着 Claude Code、Codex、WorkBuddy 三个 Agent，同一个 Skill 在各自目录下各存一份，一路攒到 40 多个，中文名占了绝大多数，还混着同名不同版本。真正让我决定动手的是一次「改完不生效」：我在 Claude Code 里调好一个 Skill，回来才发现自己改的是另一个 Runtime 下的旧副本，而 Agent 实际读的是第三份。
+我本机同时装着 Claude Code、Codex、WorkBuddy 三个 Agent，同一个 Skill 在各自目录下各存一份。真正让我决定动手的是一次「改完不生效」：我在 Claude Code 里调好一个 Skill，回来才发现自己改的是另一个 Runtime 下的旧副本，而 Agent 实际读的是第三份。
+
+那天我把四个目录全量扫了一遍：**62 个技能目录，其实只有 50 个不同的 Skill —— 多出来的 12 份全是重复**；最多的一个名字，四个目录里各存一份，没人说得清哪份是对的。中文名还占了绝大多数，同名不同版本混在一起。
 
 **原来的做法和卡点：**
 
@@ -35,7 +46,7 @@
 
 我想改善的卡点是**「分叉不可见」和「覆盖不可控」**，不是「复制粘贴太累」。这一点直接决定了方案形态：
 
-- 成熟的同类工具（`skills-manager`，5532★）已经把「写一次、多个 Agent 都能用」做透了 —— 54 个 Runtime、两年迭代、软链/拷贝双模式。我再做一遍分发，是重复造轮子。
+- 成熟的同类工具（`skills-manager`，调研时 5532★）已经把「写一次、多个 Agent 都能用」做透了 —— 54 个 Runtime、两年迭代、软链/拷贝双模式。我再做一遍分发，是重复造轮子。
 - 但它留了一块空白：**它只管「发过去」，不管「发过去之后怎么样」** —— 没有漂移检测、没有质量门禁、没有「这个 Skill 是谁改的」。而这恰好是我本职工作的母题：**资产不只是要能用，还要能被验证、能追溯。**
 
 所以方案定为 **Skill 的资产账本 + 治理控制台**，能力分四层：
@@ -67,13 +78,13 @@
 
 | 步骤 | 输入什么 | 谁来做，具体怎么做 | 产出什么，怎样算完成 |
 |---|---|---|---|
-| 1. `skillos scan` 扫描 | 本机四个 Runtime 目录（各自的部署根、只发现不部署的目录、回退根） | 引擎递归扫描：`SKILL.md` 是唯一 canonical 标记，排除 `__pycache__/`、`*.pyc`、`.git/`；路径按「分段 + Unicode NFC + casefold」求路径键，避免中文名把同一路径判成两个 | Skill 清单 + 每份的内容哈希；40+ Skill 全量扫描 < 2s |
+| 1. `skillos scan` 扫描 | 本机四个 Runtime 目录（各自的部署根、只发现不部署的目录、回退根） | 引擎递归扫描：`SKILL.md` 是唯一 canonical 标记，排除 `__pycache__/`、`*.pyc`、`.git/`；路径按「分段 + Unicode NFC + casefold」求路径键，避免中文名把同一路径判成两个 | Skill 清单 + 每份的内容哈希；50 个 Skill 全量扫描秒级完成 |
 | 2. `skillos import` 纳管 | 上一步的磁盘现状 + 本地 git 仓库 | 同 slug 多副本默认合并为一条记录、挂多个 binding，只有内容不一致才报冲突。身份判定**分层**做：来源 → 唯一内容哈希 → 目录/名字，任一层出现多个候选就**不认**（宁缺勿滥，绝不按相似度取最高分） | 仓库中出现带稳定 `skill_id` 的 Skill（跨端、跨机器、跨改名不变）；写入 `import` 记录（author + commit + 时间） |
 | 3. `skillos status` 看漂移 | canonical 仓库 + 各 Runtime 磁盘现状 | 重建 base（由 `installed_commit` + `adapter_version` 重渲染，**不用版本号反查**），与磁盘逐文件比字节哈希，判定 7 态：`SYNCED` / `MISSING` / `OUTDATED` / `MODIFIED` / `CONFLICT` / `UNMANAGED` / `ORPHANED`；判定按 Skill 聚合，组内取最严重状态 | 四端漂移矩阵（行 = Skill、列 = Runtime）；含未纳管大文件的 Skill 不上报 `SYNCED`，改报 `SYNCED*` + 徽标 |
 | 4. `skillos check` 跑门禁 | Skill 正文 + 规则集 | 规则分 `error` / `warn` / `info` 三级；结果**落库**（`skill_checks`）可对比历史 | 分级结果 + 健康度分数（可下钻到具体规则与折旧维度）；`check` 与 `push` 复用同一判定函数，不写两套 |
 | 5. `skillos push` 分发 | 通过门禁的 Skill + 目标 Runtime 列表 | **前置三关**：任一 binding 非 `SYNCED` → 整体拒绝并返回明细（不挑一个写、把其余悄悄丢下）；`error` 级门禁直接拦截；**任何会删内容的写入，先停下、列出将消失的路径、等人确认** | 写入 + **回读自证**（写完回读目标、核对清单与哈希，一致才允许上报成功）；落 `sync_records`；失败自动回滚到 `.old` |
 | 6. 人在 Web 上处理冲突 | 冲突 Skill 的三方内容（base / local / remote） | 整文件粒度四选一：保留本地 / 保留仓库 / **两个都保留** / 暂不处理；**任一选择执行前先建安全快照，可撤销** | 冲突消解完成 + 一条可回退的快照；该次决定进入版本时间轴 |
-| 7. `skillos log <slug>` 追溯 | git commit 历史 | 从 commit 取 author + message + 时间（记录源是 git，**不提供改写或删除接口**），输出人可读时间轴 | **溯源时间轴** —— 谁、何时、改了什么；这是「人走资产留」的实物背书 |
+| 7. `skillos versions <slug>` 追溯 | git commit 历史 | 从 commit 取 author + message + 时间（记录源是 git，**不提供改写或删除接口**），输出人可读时间轴；同一个能力也以 `skillos_version_log` 暴露给 Agent | **溯源时间轴** —— 谁、何时、改了什么；这是「人走资产留」的实物背书 |
 
 工作流最终交付的，是**一次可被举证的分发** —— 不是「我点了按钮、它提示成功」，而是「发完之后我回读过目标、哈希一致、有作者有 commit、并且有一条快照可以退回去」。
 
@@ -83,22 +94,23 @@
 
 **使用前准备：**
 
-- 适用 Agent：**Claude Code / Codex**（走 MCP 通道，`skillos mcp` 以 stdio 启动）
-- 环境：Python 3.13
-- 安装：`pipx install skillos`（开发态 `pip install -e .`）
-- 初始化：`skillos init` —— 建本地仓库 + 配置 + 索引
+- 适用平台：Windows x64 / macOS（Apple 芯片 + Intel）/ Linux x64，四个包都已随 v0.2.3 发布
+- **环境依赖：无** —— 发行包自带便携 CPython 与编译后的引擎，**不需要装 Python、不需要装 Node**；Windows 上缺 `git` 时用随包 MinGit 兜底
+- 启动：解压后 Windows 双击 `start.cmd`，macOS / Linux 执行 `./start.sh`（若解压后没有执行位，先 `chmod +x start.sh`）。启动器按「检测环境 → 装第三方依赖 → 起后端 → 健康自证 → 配对 → 起 daemon」一条链跑完，Web 控制台由后端同端口托管
+- 打开：浏览器访问 **http://127.0.0.1:9080** —— 首屏就是所有 Runtime 的能力总览
+- 让 Agent 也能用（可选，体验「Agent 自管」这条线）：把 `skillos mcp`（stdio）注册进 Claude Code / Codex，配置片段见包内 `references/agent-config.md`；**任何支持 stdio MCP 的 Agent 同理**
 - 调用指令（在 Agent 里直接说人话即可）：
-  - 「列出我的 Skill」→ `list_skills`
-  - 「看一下漂移状态」→ `status`
-  - 「把这个 Skill 分发到 Claude Code」→ `sync_push`（默认 `dry_run=true`）
+  - 「列出我的 Skill」→ `skillos_list_skills`
+  - 「看一下漂移状态」→ `skillos_status`
+  - 「把这个 Skill 分发到 Claude Code」→ `skillos_sync_push`（默认 `dry_run=true`）
 - **权限边界**：Agent 拿不到危险决策的开关 —— 写工具默认先预览（`dry_run`）、不暴露 `force`、也没有任何绕过质量门禁的参数；门禁拦下来就返回规则明细，由人在 Web 上决定。
 
 | 步骤 | 操作说明 | 过程图片 |
 |---|---|---|
-| 输入 | 打开 Claude Code，对 Agent 说：「把 **【Skill 名】** 分发到 Claude Code 和 Codex」。附一份可直接体验的样例 Skill 包 | 【粘贴截图】 |
-| 运行 | Agent 调 `sync_push`，默认 `dry_run`：先返回预览 —— 包含两个目标路径、将被替换的文件、以及**将消失的路径清单**。确认之后 Agent 再传 `dry_run=false` 真正落盘 | 【粘贴截图】 |
-| 查看结果 | 回到 Web 控制台 Dashboard：该 Skill 行、两个 Runtime 列都变为 `SYNCED`，最后同步时间更新；进详情页的版本时间轴，能看到这次分发的 author + commit | 【粘贴截图】 |
-| 反例演示（建议加） | 在目标目录手动放一个不属于我们的文件，再让 Agent 分发 → 工具**停下来列路径**，而不是把它删掉 | 【粘贴截图】 |
+| 输入 | 解压发行包，双击 `start.cmd`（macOS / Linux 跑 `./start.sh`），浏览器打开 `http://127.0.0.1:9080` —— 首屏即「本机 50 个 Skill / 四端副本 / 漂移状态」的能力总览 | 【图 1：启动器日志 + 控制台首屏】 |
+| 运行 | 对一个待分发的 Skill 点开分发：**先出预览** —— 两个目标路径、将被替换的文件、以及**将消失的路径清单**；确认之后才落盘。同一步在 Agent 里说「把这个 Skill 分发到 Claude Code 和 Codex」也会走同一套预览（`dry_run`） | 【图 2：分发预览弹窗，重点拍「将消失的路径」】 |
+| 查看结果 | 回到 Dashboard：该 Skill 行、两个 Runtime 列都变为 `SYNCED`，最后同步时间更新；进详情页的版本时间轴，能看到这次分发的 author + commit | 【图 3：Dashboard 的 SYNCED 与版本时间轴】 |
+| 反例演示（建议加） | 在目标目录手动放一个不属于我们的文件，再发起分发 → 工具**停下来列路径**，而不是把它删掉 | 【图 4：删除守卫拦下并列出将消失的路径】 |
 
 > 也可以附一段 3 分钟以内的演示录屏，把上面四步一次走完。
 
@@ -111,24 +123,12 @@
 - 仓库**不能**放在 OneDrive / iCloud / Dropbox 这类云同步目录里 —— 检测到会警告并要求显式确认（否则哈希会随机漂移、写入会随机失败）
 - daemon 必须和 Agent Runtime 处于**同一个文件系统命名空间** —— 如果 daemon 跑在 WSL、Runtime 在 Windows，同步结果 Agent 看不见
 - MCP 通道只给「读 + 预览」，**所有会删内容的动作都要人确认**；无人值守路径（后台批量、定时调度）遇到需要确认的删除一律**跳过并挂角标**，绝不替用户做决定
-- 超 5MB 的文件本期不纳管；含这类文件的 Skill 不会显示 `SYNCED`，而是 `SYNCED*` + 徽标 —— **宁可不支持，不谎报检测结果**
+- 超 5MB 的文件本期不纳管（阈值可配）；含这类文件的 Skill 不会显示 `SYNCED`，而是 `SYNCED*` + 徽标 —— **宁可不支持，不谎报检测结果**
+- 发行包是按平台编译的，**不能跨平台混用**（Windows 包只能在 Windows 跑），也别把它和源码目录放在一起 —— 启动器会按实际产物判定形态，混放会让人误判
 
 **还需要改进：**
 
 - 本期「评测」只到**静态门禁回归**（改完重跑一遍检查、指标不许退化，结果落库可比历史），**没有运行时跑分**（真跑 Agent 执行任务并打分）—— 那需要执行环境 + 多次采样 + 基线，成本高一个数量级，列为 V2
 - 冲突解决只做到**整文件粒度四选一**，不做块内逐行合并（单人场景冲突率极低，为重 UI 不值）
-- 上游来源跟踪与更新检测、相似/重复 Skill 检测、团队协作（Change Request / 权限）排在后续阶段
-- 规划中：按需拉取单个 Skill 的窄克隆、以 Skill 为单位的对象级合并引擎
-
----
-
-# 待补清单（提交前处理）
-
-| # | 项 | 说明 |
-|---|---|---|
-| 1 | **作品链接** | Skills 赛道要求「Skill 文件包需含 `SKILL.md` 及必要文件」。当前仓库内**尚无 `SKILL.md`** —— 需要补一个薄封装 Skill（正文说明「用 `skillos mcp` 查/管我的 Skill」+ 安装与调用指令），或改为提供 `skillos` 包 + 接入配置示例 |
-| 2 | **作者名** | 暂填「唐半仙」，请确认 |
-| 3 | **截图 / 录屏** | 第三部分 4 张图（输入 / 运行 / 结果 / 反例）+ 可选录屏 |
-| 4 | **样例 Skill 包** | 第三部分「输入」需附一份可直接体验的样例 |
-| 5 | **飞书文档权限** | 提交流程要求把文档权限设为**互联网可编辑** |
-| 6 | **删除草稿说明** | 顶部「草稿说明」块与本节，提交前删掉 |
+- 在线平台与团队协作（共用一套 Skill 账本、Change Request / 权限）尚未开放，当前交付的是**单机版**控制台
+- 上游来源跟踪与更新检测、相似/重复 Skill 检测、单个 Skill 的窄克隆拉取，排在后续阶段
