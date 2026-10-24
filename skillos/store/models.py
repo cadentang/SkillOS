@@ -7,15 +7,17 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 from sqlalchemy import (
     JSON,
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     Text,
     UniqueConstraint,
@@ -315,6 +317,58 @@ class SkillCheck(Base):
     level: Mapped[str] = mapped_column(Text, nullable=False)
     message: Mapped[str] = mapped_column(Text, nullable=False)
     value: Mapped[str | None] = mapped_column(Text)  # JSON：decay 原始测量值 / 门禁附加信息
+    at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
+
+
+class SkillUsageDaily(Base):
+    """日聚合表（N-01.3 / N-11.6，本地与云端**同构**）。
+
+    冲突键 `(device_id, skill_id, date, via)` 是云端合并与补报去重的落点（V2-T9）：
+    `INSERT ... ON CONFLICT DO UPDATE SET count = count + excluded.count`，
+    所以这里必须声明同名唯一约束。
+    """
+
+    __tablename__ = "skill_usage_daily"
+    __table_args__ = (
+        UniqueConstraint("device_id", "skill_id", "date", "via", name="uq_usage_daily"),
+        Index("ix_usage_daily_skill", "skill_id", "date"),
+    )
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    device_id: Mapped[str] = mapped_column(Text, nullable=False)   # 本地固定 'local'
+    skill_id: Mapped[str] = mapped_column(Text, nullable=False)    # skill slug
+    date: Mapped[date] = mapped_column(Date, nullable=False)       # 聚合日（UTC）
+    via: Mapped[str] = mapped_column(Text, nullable=False)         # mcp / web / cli / daemon
+    count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    tokens_in: Mapped[int] = mapped_column(Integer, nullable=False, default=0)   # L2 缺省 0
+    tokens_out: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    duration_ms_p50: Mapped[int | None] = mapped_column(Integer)
+    duration_ms_p95: Mapped[int | None] = mapped_column(Integer)
+    by_op: Mapped[str | None] = mapped_column(Text)   # JSON：{"get_skill": 3, "sync_push": 1}
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
+
+
+class SkillUsageEvent(Base):
+    """本地事件表（N-11.1）：**聚合的唯一事实源**，保留 30 天滚动清理。
+
+    不上云（N-01.5 / N-11.6）：`param_digest` 只是参数摘要，正文与参数永不入此表。
+    """
+
+    __tablename__ = "skill_usage_events"
+    __table_args__ = (
+        Index("ix_usage_events_skill_at", "skill_id", "at"),
+        Index("ix_usage_events_session", "session_id", "at"),
+    )
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    session_id: Mapped[str] = mapped_column(Text, nullable=False)   # runtime + session 组合键
+    runtime: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    skill_id: Mapped[str] = mapped_column(Text, nullable=False)
+    op: Mapped[str] = mapped_column(Text, nullable=False)
+    via: Mapped[str] = mapped_column(Text, nullable=False)
+    duration_ms: Mapped[int | None] = mapped_column(Integer)
+    ok: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    param_digest: Mapped[str | None] = mapped_column(Text)   # 参数摘要（不上云）
     at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
 
 
