@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN" data-theme="Light">
+<html lang="zh-CN" data-theme="Dark">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -11,28 +11,28 @@
    Color(Light/Dark) · Size · Type 三组变量已全部写入
    ========================================================================== */
 :root{
-  /* --- Color · Brand --- */
-  --primary:#2663EB;
-  --primary-hover:#1C4FD9;
-  --primary-soft:#F0F5FF;
-  --primary-border:#BFDBFF;
+  /* --- Color · Brand（v2 深空契约：靛蓝紫，近似值参照 Linear 差异化替换） --- */
+  --primary:#4F5FE8;
+  --primary-hover:#4351D6;
+  --primary-soft:rgba(79,95,232,.09);
+  --primary-border:rgba(79,95,232,.35);
 
   /* --- Color · Neutral --- */
-  --canvas:#F5F7FA;
+  --canvas:#F5F6F9;
   --surface:#FFFFFF;
-  --surface-alt:#FAFAFA;
-  --border:#E5E8EB;
-  --divider:#F0F2F2;
-  --text-primary:#0F1729;
-  --text-secondary:#5C6373;
-  --text-tertiary:#99A3B2;
+  --surface-alt:#F8F9FB;
+  --border:#E6E9EF;
+  --divider:#F0F2F5;
+  --text-primary:#131A2A;
+  --text-secondary:#5B6474;
+  --text-tertiary:#98A1B0;
   --inverse:#FFFFFF;
 
   /* --- Color · Semantic --- */
   --success:#17A34A;
   --warning:#F59E0A;
   --danger:#DB2626;
-  --info:#2663EB;
+  --info:#4F5FE8;
 
   /* --- Color · Drift（产品视觉语言主体，色 + 形双编码） --- */
   --drift-synced:#17A34A;
@@ -42,6 +42,15 @@
   --drift-missing:#94A3B8;
   --drift-unmanaged:#7D3BED;
   --drift-orphaned:#475469;
+
+  /* --- Color · Drift Soft（衍生令牌：各态 10~16% 透明软底，仅做底色不改主色） --- */
+  --drift-synced-soft:rgba(23,163,74,.10);
+  --drift-outdated-soft:rgba(38,99,235,.10);
+  --drift-modified-soft:rgba(245,158,10,.12);
+  --drift-conflict-soft:rgba(219,38,38,.10);
+  --drift-missing-soft:rgba(148,163,184,.16);
+  --drift-unmanaged-soft:rgba(125,59,237,.10);
+  --drift-orphaned-soft:rgba(71,84,105,.12);
 
   /* --- Color · Badge --- */
   --badge-adapter:#0EA5E9;
@@ -78,19 +87,19 @@
 }
 
 [data-theme="Dark"]{
-  --primary:#3B82F7;
-  --primary-hover:#61A6FA;
-  --primary-soft:#17243D;
-  --primary-border:#1F3B8A;
-  --canvas:#0A1221;
-  --surface:#121A29;
-  --surface-alt:#17212E;
-  --border:#242B3D;
-  --divider:#1C2433;
-  --text-primary:#E8EDF2;
-  --text-secondary:#A1ABBA;
-  --text-tertiary:#6B7587;
-  --inverse:#0A1221;
+  --primary:#7B8CFF;
+  --primary-hover:#8F9EFF;
+  --primary-soft:rgba(123,140,255,.13);
+  --primary-border:rgba(123,140,255,.38);
+  --canvas:#0B0E15;
+  --surface:#12161F;
+  --surface-alt:#171C27;
+  --border:rgba(255,255,255,.075);
+  --divider:rgba(255,255,255,.05);
+  --text-primary:#E8ECF4;
+  --text-secondary:#9AA3B5;
+  --text-tertiary:#5F6A7E;
+  --inverse:#0B0E15;
   --success:#21C45E;
   --warning:#FABF24;
   --danger:#F77070;
@@ -101,6 +110,13 @@
   --drift-missing:#6B7587;
   --drift-unmanaged:#A670FA;
   --drift-orphaned:#808C9E;
+  --drift-synced-soft:rgba(33,196,94,.12);
+  --drift-outdated-soft:rgba(59,130,247,.13);
+  --drift-modified-soft:rgba(250,191,36,.12);
+  --drift-conflict-soft:rgba(247,112,112,.13);
+  --drift-missing-soft:rgba(107,117,135,.16);
+  --drift-unmanaged-soft:rgba(166,112,250,.13);
+  --drift-orphaned-soft:rgba(128,140,158,.14);
 }
 
 /* ==========================================================================

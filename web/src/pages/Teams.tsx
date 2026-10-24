@@ -185,16 +185,16 @@ export default function Teams() {
                     }}
                   >
                     <svg width="24" height="24" viewBox="0 0 22 22" fill="none" aria-hidden>
-                      <circle cx="8.5" cy="7.5" r="3.2" stroke="#2663EB" strokeWidth="1.8" />
+                      <circle cx="8.5" cy="7.5" r="3.2" stroke="var(--primary)" strokeWidth="1.8" />
                       <path
                         d="M2.5 18c0-3 2.7-5.5 6-5.5s6 2.5 6 5.5"
-                        stroke="#2663EB"
+                        stroke="var(--primary)"
                         strokeWidth="1.8"
                         strokeLinecap="round"
                       />
                       <path
                         d="M15 6.2a3.2 3.2 0 0 1 0 5.6M17 18c0-2.1-.8-4-2.1-5.2"
-                        stroke="#2663EB"
+                        stroke="var(--primary)"
                         strokeWidth="1.8"
                         strokeLinecap="round"
                       />
@@ -786,7 +786,7 @@ function Stat({ title, value, sub }: { title: string; value: string; sub: React.
 /** 给成员固定一个 avatar 配色（按 user_id hash 选 5 色之一）。
  *  视觉与 Teams 数据解耦；user_id 仅做种子，不读 PII。 */
 function avatarColor(userId: string): string {
-  const palette = ["var(--primary)", "#7D3BED", "#0EA5E9", "#F59E0A", "#17A34A"];
+  const palette = ["var(--primary)", "var(--drift-unmanaged)", "var(--badge-adapter)", "var(--warning)", "var(--success)"];
   let h = 0;
   for (let i = 0; i < userId.length; i++) h = (h * 31 + userId.charCodeAt(i)) >>> 0;
   return palette[h % palette.length];

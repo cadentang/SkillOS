@@ -5,7 +5,7 @@ import { tokenStore } from "../api/client";
 
 /** 登录页（FR-2.4.1 / 设计稿 app/index.html §06）。
  *
- * 视觉：左 135deg 蓝渐变（#2663EB→#122980）+ logo + title + 3 项 features，
+ * 视觉：左 135deg 靛蓝紫渐变（var(--primary)→深靛）+ logo + title + 3 项 features，
  *      右 560px 表单 + tip。
  *
  * 注册模式（demo 现场需要）：URL `?register=1` 启用，仍走 endpoints.register，
@@ -15,9 +15,9 @@ import { tokenStore } from "../api/client";
 function LoginLogo() {
   return (
     <svg width="30" height="30" viewBox="0 0 16 16" fill="none" aria-hidden>
-      <path d="M8 1.5L14 4.8L8 8.1L2 4.8L8 1.5Z" fill="#2663EB" />
-      <path d="M2 8L8 11.3L14 8" stroke="#2663EB" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" opacity=".65" />
-      <path d="M2 11.2L8 14.5L14 11.2" stroke="#2663EB" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" opacity=".35" />
+      <path d="M8 1.5L14 4.8L8 8.1L2 4.8L8 1.5Z" fill="var(--primary)" />
+      <path d="M2 8L8 11.3L14 8" stroke="var(--primary)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" opacity=".65" />
+      <path d="M2 11.2L8 14.5L14 11.2" stroke="var(--primary)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" opacity=".35" />
     </svg>
   );
 }
@@ -80,7 +80,7 @@ export default function Login() {
         className="flex min-w-0 flex-1 flex-col items-center justify-center gap-lg"
         style={{
           padding: 72,
-          background: "linear-gradient(135deg, #2663EB 0%, #122980 100%)",
+          background: "linear-gradient(135deg, var(--primary) 0%, #2A2F73 100%)",
         }}
       >
         <div

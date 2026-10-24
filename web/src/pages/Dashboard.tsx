@@ -244,8 +244,8 @@ export default function Dashboard() {
             }}
           >
             <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden>
-              <circle cx="7" cy="7" r="4.5" stroke="#99A3B2" strokeWidth="1.6" />
-              <path d="M10.5 10.5L14 14" stroke="#99A3B2" strokeWidth="1.6" strokeLinecap="round" />
+              <circle cx="7" cy="7" r="4.5" stroke="var(--text-tertiary)" strokeWidth="1.6" />
+              <path d="M10.5 10.5L14 14" stroke="var(--text-tertiary)" strokeWidth="1.6" strokeLinecap="round" />
             </svg>
             <input
               value={search}

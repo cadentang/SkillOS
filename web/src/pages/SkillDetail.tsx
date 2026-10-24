@@ -219,9 +219,9 @@ export default function SkillDetail() {
             title="含未纳管资产（FR-1.0.20）：存在超阈值大文件，不参与分发"
           >
             <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden>
-              <path d="M6 1.2L11 10.4H1L6 1.2Z" stroke="#5C6373" strokeWidth="1.2" strokeLinejoin="round" />
-              <path d="M6 4.8V7" stroke="#5C6373" strokeWidth="1.2" strokeLinecap="round" />
-              <circle cx="6" cy="8.8" r="0.7" fill="#5C6373" />
+              <path d="M6 1.2L11 10.4H1L6 1.2Z" stroke="var(--text-secondary)" strokeWidth="1.2" strokeLinejoin="round" />
+              <path d="M6 4.8V7" stroke="var(--text-secondary)" strokeWidth="1.2" strokeLinecap="round" />
+              <circle cx="6" cy="8.8" r="0.7" fill="var(--text-secondary)" />
             </svg>
             含未纳管资产
           </span>
@@ -235,7 +235,7 @@ export default function SkillDetail() {
             title="模板已升级（FR-1.0.19）"
           >
             <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden>
-              <path d="M6 10.5V1.5M2.5 5L6 1.5L9.5 5" stroke="#0EA5E9" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+              <path d="M6 10.5V1.5M2.5 5L6 1.5L9.5 5" stroke="var(--badge-adapter)" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
             模板已升级
           </span>
