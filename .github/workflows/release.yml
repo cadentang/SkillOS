@@ -120,7 +120,9 @@ jobs:
       - name: Build compiled distribution
         run: |
           VERSION="${{ github.ref_name }}"
-          if [ -z "$VERSION" ] || [ "$VERSION" = "main" ]; then VERSION="0.0.0"; fi
+          # ref 是分支名（而非 tag）时兜底成 0.0.0；主干已从 main 迁到 master，两边都要认，
+          # 否则从 master 手动 workflow_dispatch 会把 "master" 当成版本号传进 build.py。
+          if [ -z "$VERSION" ] || [ "$VERSION" = "main" ] || [ "$VERSION" = "master" ]; then VERSION="0.0.0"; fi
           python build/build.py --version-string "$VERSION"
 
       - name: Smoke (形态保密 + 运行时 + CLI + MCP + ASGI 四重自证)

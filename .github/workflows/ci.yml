@@ -5,8 +5,10 @@
 name: CI
 
 on:
+  # 主干已从 main 迁到 master（2026-10-24）：这里不改，push 到 master 就完全不触发 CI，
+  # 而 PR 仍会跑 —— 表面看不出问题，是最危险的一种哑火。
   push:
-    branches: [main]
+    branches: [master]
   pull_request:
 
 jobs:
