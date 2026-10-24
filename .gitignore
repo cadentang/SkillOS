@@ -40,13 +40,14 @@ build/*.egg-info/
 # 只留 hackathon/作品介绍-SkillOS.md 入库；素材本地留存，需要归档时单独处理
 hackathon/SkillOS分享/
 hackathon/分享配图/
-hackathon/分享稿-学习群图文分享.md
 hackathon/_make_share_images.py
 hackathon/_make_dup_figure.py
 
 # AI 辅助工具的项目级数据（计划/会话状态，非交付物）
 .codebuddy/
 .workbuddy/memory/
+# 设计稿（HTML 原型，非交付物）
+.workbuddy/design/
 
 # 本地环境与凭据（NFR-2：token 禁止入项目目录）
 .env
@@ -63,3 +64,14 @@ Thumbs.db
 .skillos/
 sandbox/runtime/
 data/*.sqlite3
+
+# 一体化发行包解到仓库根的内容（README/SKILL/manifest/scripts/references/vendor 属发行包，
+# 不是本仓库源码；vendor/ 下还有随平台而异的便携 CPython / MinGit 大件）
+/README.md
+/SKILL.md
+/manifest.json
+/scripts/
+/references/
+/vendor/
+# bootstrap 解出来的前端产物（与 skillos/web_dist/ 同性质，可由归档重建）
+/web_dist/
