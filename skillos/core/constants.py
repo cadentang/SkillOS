@@ -23,6 +23,7 @@ WS_TASK_OPS: frozenset[str] = frozenset(
     {
         "scan", "status", "push", "pull", "file_read", "file_write", "file_tree",
         "version_log", "diff", "rollback", "gate_summary", "check", "decay",
+        "usage_aggregate",   # V2-T8：日聚合重算 + 事件清理（5.2）
         "file_history", "tag_list", "tag_create",
         # P3：CONFLICT 四选一（FR-2.2.6 / T22）。Web 人工路径专享；
         # MCP 工具签名故意不暴露 keep_both 选项（test_conflicts_p3 红线守护）。

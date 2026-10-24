@@ -16,8 +16,10 @@ from __future__ import annotations
 import hashlib
 import json
 import secrets
+from datetime import UTC, datetime, time, timedelta
 from typing import Any, Protocol
 
+from skillos.core.algorithm.usage import aggregate_buckets
 from skillos.core.logging import get_logger
 
 log = get_logger("skillos.usage")
@@ -28,6 +30,10 @@ VIA_WEB = "web"
 VIA_CLI = "cli"
 VIA_DAEMON = "daemon"
 VIA_VALUES = frozenset({VIA_MCP, VIA_WEB, VIA_CLI, VIA_DAEMON})
+
+# N-11.1：事件表保留 30 天；聚合窗口与它对齐（5.2：近 30 天重算）
+EVENT_RETENTION_DAYS = 30
+AGGREGATE_WINDOW_DAYS = 30
 
 
 def new_session_id() -> str:
@@ -45,6 +51,9 @@ class _UsageStore(Protocol):
     def add_usage_event(self, *, session_id: str, runtime: str, skill_id: str, op: str,
                         via: str, duration_ms: int | None, ok: bool,
                         param_digest: str | None) -> None: ...
+    def list_usage_events(self, since: datetime) -> list[Any]: ...
+    def replace_usage_daily(self, since: Any, rows: list[dict]) -> int: ...
+    def purge_usage_events(self, before: datetime) -> int: ...
 
 
 class _Switch(Protocol):
@@ -94,3 +103,24 @@ class UsageService:
             param_digest=digest,
         )
         return True
+
+    # ---------------------------------------------------------------- 聚合 / 清理
+
+    def aggregate(self, *, days: int = AGGREGATE_WINDOW_DAYS,
+                  now: datetime | None = None) -> int:
+        """以事件表重算最近 `days` 天的日聚合（幂等，TQ-02）。
+
+        幂等靠「窗口内整体覆盖」而不是累加：同一批事件跑两次结果必须一致，
+        否则定时任务重试一次就把数字算翻倍。
+        """
+        current = now or datetime.now(UTC)
+        since_day = (current - timedelta(days=days - 1)).date()
+        since_dt = datetime.combine(since_day, time.min, tzinfo=UTC)
+        events = self._store.list_usage_events(since_dt)
+        return self._store.replace_usage_daily(since_day, aggregate_buckets(events))
+
+    def purge(self, *, keep_days: int = EVENT_RETENTION_DAYS,
+              now: datetime | None = None) -> int:
+        """清理 30 天前事件。**只在聚合完成后调用**（5.2 表注：先重算后清理）。"""
+        cutoff = (now or datetime.now(UTC)) - timedelta(days=keep_days)
+        return self._store.purge_usage_events(cutoff)

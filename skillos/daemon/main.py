@@ -21,6 +21,7 @@ import sys
 import threading
 import time
 from collections import OrderedDict
+from datetime import datetime
 from pathlib import Path
 
 import websockets
@@ -148,6 +149,11 @@ class TaskExecutor:
 
     def _dispatch(self, op: str, params: dict) -> dict:
         engine = self.engine
+        if op == "usage_aggregate":
+            # 5.2：只接受 params.truncated（不接任意参数/SQL）；重算在前、清理在后
+            rows = engine.usage.aggregate()
+            purged = engine.usage.purge()
+            return {"ok": True, "data": {"rows": rows, "purged": purged}}
         if op == "scan":
             items = [
                 {
@@ -768,8 +774,28 @@ async def run(cloud_url: str, pair_code: str | None = None,
                             "payload": {"matrix": p},
                         }))
 
+                async def usage_tick() -> None:
+                    """5.2：每日 00:10（本地时）重算聚合并清理 30 天前事件。
+
+                    每分钟醒一次、当天只跑一次；落库走 to_thread，不占事件循环。
+                    """
+                    last_run_day = None
+                    while True:
+                        now = datetime.now().astimezone()
+                        due = (now.hour, now.minute) >= (0, 10)
+                        if due and last_run_day != now.date():
+                            try:
+                                await asyncio.to_thread(
+                                    executor.execute, "usage_aggregate", {}
+                                )
+                                last_run_day = now.date()
+                            except Exception:  # noqa: BLE001 —— 维护任务失败不拖垮连接
+                                log.exception("usage_aggregate_failed")
+                        await asyncio.sleep(60)
+
                 hb = asyncio.create_task(heartbeat())
                 rep = asyncio.create_task(periodic_report())
+                agg = asyncio.create_task(usage_tick())
                 try:
                     while True:
                         raw = await ws.recv()
@@ -849,6 +875,7 @@ async def run(cloud_url: str, pair_code: str | None = None,
                 finally:
                     hb.cancel()
                     rep.cancel()
+                    agg.cancel()
                     reset_op_context()
                     log.info(
                         "ws_disconnected",

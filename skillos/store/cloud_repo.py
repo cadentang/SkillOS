@@ -250,13 +250,10 @@ class CloudRepo:
         只清 `scope='gate'` 的行 —— 折旧（decay）结果由 `record_decay_checks` 单独维护，
         两类结果同表但互不覆盖（E-02.6）。
         """
-        for row in self.s.scalars(
-            select(models.SkillCheck).where(
-                models.SkillCheck.skill_id == skill_id,
-                models.SkillCheck.scope == "gate",
-            )
-        ):
-            self.s.delete(row)
+        self.s.execute(delete(models.SkillCheck).where(
+            models.SkillCheck.skill_id == skill_id,
+            models.SkillCheck.scope == "gate",
+        ))
         for f in findings:
             level = str(f.get("level") or "info").lower()
             if level not in ("error", "warn", "info"):
@@ -270,13 +267,10 @@ class CloudRepo:
 
     def record_decay_checks(self, skill_id: str, rows: list[dict]) -> int:
         """折旧三维落库（E-02.6）：一行一个维度，`value` 存原始测量值供 UI 下钻。"""
-        for row in self.s.scalars(
-            select(models.SkillCheck).where(
-                models.SkillCheck.skill_id == skill_id,
-                models.SkillCheck.scope == "decay",
-            )
-        ):
-            self.s.delete(row)
+        self.s.execute(delete(models.SkillCheck).where(
+            models.SkillCheck.skill_id == skill_id,
+            models.SkillCheck.scope == "decay",
+        ))
         for row in rows:
             self.s.add(models.SkillCheck(
                 id=f"chk_{secrets.token_hex(8)}", skill_id=skill_id, scope="decay",

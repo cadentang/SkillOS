@@ -8,11 +8,11 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Protocol
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session, aliased
 
 from skillos.store.models import (
@@ -23,6 +23,7 @@ from skillos.store.models import (
     SkillCheck,
     SkillDependency,
     SkillTag,
+    SkillUsageDaily,
     SkillUsageEvent,
     SyncRecord,
 )
@@ -83,6 +84,9 @@ class IndexStore(Protocol):
     def add_usage_event(self, *, session_id: str, runtime: str, skill_id: str, op: str,
                         via: str, duration_ms: int | None, ok: bool,
                         param_digest: str | None) -> None: ...
+    def list_usage_events(self, since: datetime) -> list[SkillUsageEvent]: ...
+    def replace_usage_daily(self, since: date, rows: list[dict]) -> int: ...
+    def purge_usage_events(self, before: datetime) -> int: ...
     # 检查结果（E-02.6）：折旧维度一行一个，写入前先清该 skill 的旧 decay 行
     def replace_decay_checks(self, skill_id: str, rows: list[dict]) -> int: ...
     # 依赖图（E-02.1 反向入度）：(声明方 slug, 被依赖 slug)
@@ -243,6 +247,44 @@ class SqliteIndexStore:
         ))
         self._s.commit()
 
+    def list_usage_events(self, since: datetime) -> list[SkillUsageEvent]:
+        return list(self._s.scalars(
+            select(SkillUsageEvent)
+            .where(SkillUsageEvent.at >= since)
+            .order_by(SkillUsageEvent.at)
+        ))
+
+    def replace_usage_daily(self, since: date, rows: list[dict]) -> int:
+        """重算窗口内整体覆盖（TQ-02 幂等口径）：先删该区间，再写新行。
+
+        不用「累加 upsert」：聚合是**从事件表重算**，同一批事件跑两次必须得出同一结果。
+        """
+        self._s.execute(delete(SkillUsageDaily).where(SkillUsageDaily.date >= since))
+        for row in rows:
+            self._s.add(SkillUsageDaily(
+                id=_ulid(),
+                device_id=row["device_id"],
+                skill_id=row["skill_id"],
+                date=row["date"],
+                via=row["via"],
+                count=row["count"],
+                tokens_in=row.get("tokens_in", 0),
+                tokens_out=row.get("tokens_out", 0),
+                duration_ms_p50=row.get("duration_ms_p50"),
+                duration_ms_p95=row.get("duration_ms_p95"),
+                by_op=row.get("by_op"),
+            ))
+        self._s.commit()
+        return len(rows)
+
+    def purge_usage_events(self, before: datetime) -> int:
+        """清理 30 天前事件（N-11.1）；只在重算完成后调用（5.2 表注）。"""
+        result = self._s.execute(
+            delete(SkillUsageEvent).where(SkillUsageEvent.at < before)
+        )
+        self._s.commit()
+        return int(result.rowcount or 0)
+
     # ---- 检查结果（E-02.6）----
 
     def replace_decay_checks(self, skill_id: str, rows: list[dict]) -> int:
@@ -250,12 +292,9 @@ class SqliteIndexStore:
 
         「先清后写」保持「最新一次检查」语义 —— 与云端 record_checks 同口径。
         """
-        for old in self._s.scalars(
-            select(SkillCheck).where(
-                SkillCheck.skill_id == skill_id, SkillCheck.scope == "decay"
-            )
-        ):
-            self._s.delete(old)
+        self._s.execute(delete(SkillCheck).where(
+            SkillCheck.skill_id == skill_id, SkillCheck.scope == "decay"
+        ))
         for row in rows:
             self._s.add(SkillCheck(
                 id=_ulid(),
