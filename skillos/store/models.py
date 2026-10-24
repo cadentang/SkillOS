@@ -290,17 +290,31 @@ class UpstreamSource(Base):
 
 
 class SkillCheck(Base):
+    """检查结果（NFR-9 审计）。
+
+    E-02.6：折旧三维与门禁 findings 同表，用 `scope` 区分 —— `gate` 为门禁逐条规则，
+    `decay` 为折旧维度，`value` 存原始测量值 JSON 供 UI 下钻（NFR-10.3）。
+    E-01.3：decay 行 ok→info / degraded→warn / unknown→**unknown**，
+    「未知 N 项」就是 `scope='decay' AND level='unknown'` 的行数，必须数得出来。
+    """
+
     __tablename__ = "skill_checks"
     __table_args__ = (
-        CheckConstraint("level IN ('error','warn','info')", name="ck_check_level"),
+        CheckConstraint(
+            "level IN ('error','warn','info','unknown')", name="ck_check_level"
+        ),
+        CheckConstraint("scope IN ('gate','decay')", name="ck_check_scope"),
     )
 
     id: Mapped[str] = mapped_column(Text, primary_key=True)
     skill_id: Mapped[str] = mapped_column(ForeignKey("skills.id"), nullable=False)
     version_id: Mapped[str | None] = mapped_column(ForeignKey("skill_versions.id"))
+    scope: Mapped[str] = mapped_column(Text, nullable=False, default="gate",
+                                      server_default="gate")
     rule: Mapped[str] = mapped_column(Text, nullable=False)  # 见 core/algorithm/checks.py
     level: Mapped[str] = mapped_column(Text, nullable=False)
     message: Mapped[str] = mapped_column(Text, nullable=False)
+    value: Mapped[str | None] = mapped_column(Text)  # JSON：decay 原始测量值 / 门禁附加信息
     at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
 
 

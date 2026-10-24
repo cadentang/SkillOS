@@ -142,9 +142,11 @@ def _decay_status(decay: Mapping[str, object], dim: str) -> str:
     P3 的扁平结果（`{"staleness_days": 12.5, "dependency_broken": [...]}`）。
     判不出来一律 unknown —— 不猜（NFR-10.4）。
     """
-    raw = decay.get(dim)
-    if isinstance(raw, str) and raw in _DECAY_STATUSES:
-        return raw
+    # 优先读显式状态键（依赖维度与旧字段同名，故状态用 `<dim>_status` 避免撞车）
+    for key in (f"{dim}_status", dim):
+        raw = decay.get(key)
+        if isinstance(raw, str) and raw in _DECAY_STATUSES:
+            return raw
     if dim == "staleness":
         days = decay.get("staleness_days")
         if not _is_number(days):

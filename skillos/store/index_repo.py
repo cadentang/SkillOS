@@ -13,9 +13,17 @@ from pathlib import Path
 from typing import Protocol
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
-from skillos.store.models import Runtime, RuntimeBinding, Skill, SkillTag, SyncRecord
+from skillos.store.models import (
+    Runtime,
+    RuntimeBinding,
+    Skill,
+    SkillCheck,
+    SkillDependency,
+    SkillTag,
+    SyncRecord,
+)
 
 
 def _now() -> datetime:
@@ -66,6 +74,10 @@ class IndexStore(Protocol):
     def get_binding(self, skill_id: str, runtime_id: str) -> RuntimeBinding | None: ...
     def list_bindings(self, skill_id: str | None = None) -> list[RuntimeBinding]: ...
     def delete_bindings(self, skill_id: str) -> None: ...
+    # 检查结果（E-02.6）：折旧维度一行一个，写入前先清该 skill 的旧 decay 行
+    def replace_decay_checks(self, skill_id: str, rows: list[dict]) -> int: ...
+    # 依赖图（E-02.1 反向入度）：(声明方 slug, 被依赖 slug)
+    def list_dependency_edges(self) -> list[tuple[str, str]]: ...
     # sync 审计（NFR-9）
     def record_sync(self, skill_id: str | None, runtime_id: str | None, action: str,
                     from_state: str | None, to_state: str | None,
@@ -195,6 +207,43 @@ class SqliteIndexStore:
         if skill_id:
             stmt = stmt.where(RuntimeBinding.skill_id == skill_id)
         return list(self._s.scalars(stmt))
+
+    # ---- 检查结果（E-02.6）----
+
+    def replace_decay_checks(self, skill_id: str, rows: list[dict]) -> int:
+        """整批替换该 skill 的 decay 行（保留 gate 行）。
+
+        「先清后写」保持「最新一次检查」语义 —— 与云端 record_checks 同口径。
+        """
+        for old in self._s.scalars(
+            select(SkillCheck).where(
+                SkillCheck.skill_id == skill_id, SkillCheck.scope == "decay"
+            )
+        ):
+            self._s.delete(old)
+        for row in rows:
+            self._s.add(SkillCheck(
+                id=_ulid(),
+                skill_id=skill_id,
+                scope="decay",
+                rule=row["rule"],
+                level=row["level"],
+                message=row["message"],
+                value=row.get("value"),
+            ))
+        self._s.commit()
+        return len(rows)
+
+    def list_dependency_edges(self) -> list[tuple[str, str]]:
+        """依赖图的边集合（E-02.1 反向入度用）。未登记的对端 slug 不返回。"""
+        owner = aliased(Skill)
+        dep = aliased(Skill)
+        stmt = (
+            select(owner.slug, dep.slug)
+            .join(SkillDependency, SkillDependency.skill_id == owner.id)
+            .join(dep, dep.id == SkillDependency.depends_on_skill_id)
+        )
+        return [(a, b) for a, b in self._s.execute(stmt).all()]
 
     # ---- sync 审计（NFR-9）----
 

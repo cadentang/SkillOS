@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from skillos.api.deps import get_current_user_id, get_repo
 from skillos.core.algorithm.checks import summarize_health
+from skillos.services.check_service import decay_rows
 from skillos.store.cloud_repo import CloudRepo
 
 router = APIRouter(prefix="/skills", tags=["checks"])
@@ -47,10 +48,12 @@ async def skill_checks(slug: str, request: Request,
 
     findings = (gate.get("data") or {}).get("findings") or []
     decay_data = (decay.get("data") or {}) if decay.get("ok") else None
-    # 落库（NFR-9）：逐条 findings + 折旧
+    # 落库（NFR-9）：逐条 findings + 折旧三维（E-02.6，同表不同 scope，互不覆盖）
     skill = repo.get_skill_by_slug(slug)
     if skill is not None:
         repo.record_checks(skill.id, findings)
+        if decay_data:
+            repo.record_decay_checks(skill.id, decay_rows(decay_data))
     # 健康度（FR-1.0.24 退化形态：门禁结果计数，T11 —— 仅展示，禁入放行判定）
     health = summarize_health(findings, decay_data)
     return {

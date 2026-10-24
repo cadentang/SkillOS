@@ -245,9 +245,16 @@ class CloudRepo:
         return self.s.scalar(select(models.Skill).where(models.Skill.slug == slug))
 
     def record_checks(self, skill_id: str, findings: list[dict]) -> None:
-        """门禁结果落库（FR-1.0.11 / NFR-9）：先清旧再写新，保持「最新一次」语义。"""
+        """门禁结果落库（FR-1.0.11 / NFR-9）：先清旧再写新，保持「最新一次」语义。
+
+        只清 `scope='gate'` 的行 —— 折旧（decay）结果由 `record_decay_checks` 单独维护，
+        两类结果同表但互不覆盖（E-02.6）。
+        """
         for row in self.s.scalars(
-            select(models.SkillCheck).where(models.SkillCheck.skill_id == skill_id)
+            select(models.SkillCheck).where(
+                models.SkillCheck.skill_id == skill_id,
+                models.SkillCheck.scope == "gate",
+            )
         ):
             self.s.delete(row)
         for f in findings:
@@ -255,11 +262,29 @@ class CloudRepo:
             if level not in ("error", "warn", "info"):
                 level = "info"
             self.s.add(models.SkillCheck(
-                id=f"chk_{secrets.token_hex(8)}", skill_id=skill_id,
+                id=f"chk_{secrets.token_hex(8)}", skill_id=skill_id, scope="gate",
                 rule=str(f.get("rule") or ""), level=level,
                 message=str(f.get("message") or ""),
             ))
         self.s.commit()
+
+    def record_decay_checks(self, skill_id: str, rows: list[dict]) -> int:
+        """折旧三维落库（E-02.6）：一行一个维度，`value` 存原始测量值供 UI 下钻。"""
+        for row in self.s.scalars(
+            select(models.SkillCheck).where(
+                models.SkillCheck.skill_id == skill_id,
+                models.SkillCheck.scope == "decay",
+            )
+        ):
+            self.s.delete(row)
+        for row in rows:
+            self.s.add(models.SkillCheck(
+                id=f"chk_{secrets.token_hex(8)}", skill_id=skill_id, scope="decay",
+                rule=str(row.get("rule") or ""), level=str(row.get("level") or "unknown"),
+                message=str(row.get("message") or ""), value=row.get("value"),
+            ))
+        self.s.commit()
+        return len(rows)
 
     # ---------------------------------------------------------------- Team & 协作（P6，FR-3.7）
 

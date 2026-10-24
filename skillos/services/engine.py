@@ -23,8 +23,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from sqlalchemy.orm import Session
+
+if TYPE_CHECKING:  # 仅类型：check_service 反向依赖 engine 的类型会成环
+    from skillos.services.check_service import CheckService
 
 from skillos.core.algorithm.adapters.agents import AgentsAdapter
 from skillos.core.algorithm.adapters.base import RuntimeAdapter
@@ -1720,32 +1724,45 @@ class LocalEngine:
         binding.last_synced_at = datetime.now(UTC)
         self.db.upsert_binding(binding)
 
-    # ------------------------------------------------ 折旧度量（P3，FR-1.0.23）
-    def decay_metrics(self, slug: str) -> dict:
-        """折旧两维度（纯静态分析，排期 P3）：staleness + dependency_broken。
+    # ------------------------------------------------ 折旧度量（E-02，FR-1.0.23）
+    @property
+    def checks(self) -> CheckService:
+        """检查编排（取证 + 落库在 services/check_service，判定在 core/algorithm/decay）。"""
+        svc = getattr(self, "_check_service", None)
+        if svc is None:
+            from skillos.services.check_service import CheckService
 
-        - staleness_days：距最后一次触碰该 skill 的 commit 的天数
-        - dependency_broken：frontmatter `requires` 声明但库中不存在的依赖
-          （依赖声明口径：meta.extra.requires，标准字段集未含依赖，暂以此为准）
-        upstream_divergence 依赖 FR-1.0.13（P7），只留接口不入本期。
+            svc = CheckService(git=self.git, store=self.db, head=self._head)
+            self._check_service = svc
+        return svc
+
+    def decay_metrics(self, slug: str) -> dict:
+        """折旧三维（E-02）：staleness / dependency_broken / upstream_divergence。
+
+        返回值同时满足两代口径：
+        - 新：`staleness`、`dependency_broken_status`、`upstream_divergence` 三态字符串
+          + `value` 原始测量值（E-02.6 供 UI 下钻）
+        - 旧（前端 M2-09 换新面板前仍在读）：`staleness_days` 与 `dependency_broken`
+          失效依赖 slug 数组 —— 依赖维度的状态因此改名为 `dependency_broken_status`
         """
-        commits = self.git.log(path=f"skills/{slug}", limit=1)
-        staleness_days: float | None = None
-        if commits:
-            last = datetime.fromisoformat(commits[0].at)
-            staleness_days = round(
-                (datetime.now(last.tzinfo) - last).total_seconds() / 86400, 1
-            )
-        snapshot = self.git.snapshot_at(self._head(), slug)
-        declared = snapshot.meta.extra.get("requires") or []
-        if not isinstance(declared, list):
-            declared = [str(declared)]
-        known = self._all_slugs()
-        broken = [str(d) for d in declared if str(d) not in known]
+        result = self.checks.decay(slug)
+        self.checks.record_decay(slug, result)   # 落库 skill_checks(scope=decay)
+        data = result.to_dict()
+        value = data["value"]
         return {
             "slug": slug,
-            "staleness_days": staleness_days,
-            "dependency_broken": broken,
+            "staleness": data["staleness"],
+            "dependency_broken_status": data["dependency_broken"],
+            "upstream_divergence": data["upstream_divergence"],
+            "value": value,
+            # 旧字段兼容（数值四舍五入到 1 位，与历史输出一致）
+            "staleness_days": (
+                round(value["days_since"], 1)
+                if isinstance(value.get("days_since"), (int, float))
+                else None
+            ),
+            "dependency_broken": list(value.get("missing_deps") or [])
+            + list(value.get("unbound_deps") or []),
         }
 
     # ---- Settings 区块（FR-2.4.10 / T26）----
