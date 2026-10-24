@@ -16,6 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, aliased
 
 from skillos.store.models import (
+    AppSetting,
     Runtime,
     RuntimeBinding,
     Skill,
@@ -74,6 +75,9 @@ class IndexStore(Protocol):
     def get_binding(self, skill_id: str, runtime_id: str) -> RuntimeBinding | None: ...
     def list_bindings(self, skill_id: str | None = None) -> list[RuntimeBinding]: ...
     def delete_bindings(self, skill_id: str) -> None: ...
+    # 设备侧开关（V2-T1）：value 为 JSON 字符串
+    def get_setting(self, key: str) -> str | None: ...
+    def set_setting(self, key: str, value: str) -> None: ...
     # 检查结果（E-02.6）：折旧维度一行一个，写入前先清该 skill 的旧 decay 行
     def replace_decay_checks(self, skill_id: str, rows: list[dict]) -> int: ...
     # 依赖图（E-02.1 反向入度）：(声明方 slug, 被依赖 slug)
@@ -207,6 +211,21 @@ class SqliteIndexStore:
         if skill_id:
             stmt = stmt.where(RuntimeBinding.skill_id == skill_id)
         return list(self._s.scalars(stmt))
+
+    # ---- 设备侧开关（V2-T1）----
+
+    def get_setting(self, key: str) -> str | None:
+        row = self._s.get(AppSetting, key)
+        return row.value if row is not None else None
+
+    def set_setting(self, key: str, value: str) -> None:
+        row = self._s.get(AppSetting, key)
+        if row is None:
+            self._s.add(AppSetting(key=key, value=value))
+        else:
+            row.value = value
+            row.updated_at = _now()
+        self._s.commit()
 
     # ---- 检查结果（E-02.6）----
 

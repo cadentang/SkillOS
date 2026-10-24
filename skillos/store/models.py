@@ -372,6 +372,21 @@ class SkillUsageEvent(Base):
     at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
 
 
+class AppSetting(Base):
+    """设备侧开关（V2-T1）：一张 KV 表，本地与云端同构。
+
+    为什么不用 JSON 文件：可审计、可迁移；为什么不用单独列：开关会继续加，
+    每加一个开关就改一次表结构不划算。`value` 一律 JSON 序列化（含布尔与对象）。
+    云端同表不同 key 域，不与设备本地开关混用。
+    """
+
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(Text, primary_key=True)
+    value: Mapped[str] = mapped_column(Text, nullable=False)   # JSON
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
+
+
 class SkillSimilarity(Base):
     __tablename__ = "skill_similarity"
     __table_args__ = (
