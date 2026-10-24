@@ -55,22 +55,29 @@ class GateResult:
     has_error: bool  # 门禁判定只看这一位
 
 
+class RuleId(StrEnum):
+    """规则 ID 契约（E-03.2）。
+
+    Web 下钻、MCP 错误信封（`GATE_FAILED` 明细）、CLI `--json` 都引用它 ——
+    重命名 / 删除规则 = 破坏性变更，须在 `00-需求定稿.md` 立项。
+    代码里**只准引用本枚举**，不写字面量（否则改名时漏改一处就断链）。
+    """
+
+    NAME_REQUIRED = "fm.name.required"
+    DESCRIPTION_REQUIRED = "fm.description.required"
+    DESCRIPTION_LENGTH = "fm.description.length"
+    DESCRIPTION_TOKENS = "fm.description.tokens"
+    NAME_KEBAB = "fm.name.kebab"
+    UNKNOWN_FIELD = "fm.unknown"
+    SKILL_MD_MISSING = "struct.skill_md"
+    REF_MISSING = "struct.ref.missing"
+    DEP_MISSING = "dep.missing"
+    DEP_CYCLE = "dep.cycle"
+    ASSET_UNTRACKED = "asset.untracked"  # 排期 P1 新增（FR-1.0.20）
+
+
 # 规则清单（rule ID 即白名单，新增规则必须同步 04 §2.1.4 表）
-RULES: frozenset[str] = frozenset(
-    {
-        "fm.name.required",
-        "fm.description.required",
-        "fm.description.length",
-        "fm.description.tokens",
-        "fm.name.kebab",
-        "fm.unknown",
-        "struct.skill_md",
-        "struct.ref.missing",
-        "dep.missing",
-        "dep.cycle",
-        "asset.untracked",  # 排期 P1 新增（FR-1.0.20）
-    }
-)
+RULES: frozenset[str] = frozenset(item.value for item in RuleId)
 
 # description 长度区间与 token 提示阈值已归位 core/constants.py（E-03.3），此处只引用。
 
@@ -251,16 +258,20 @@ def run_gate(snapshot: SkillSnapshot, ctx: GateContext) -> GateResult:
 
     # ---- frontmatter 规则 ----
     if not meta.name:
-        findings.append(RuleFinding("fm.name.required", CheckLevel.ERROR, "frontmatter 缺少 name"))
+        findings.append(
+            RuleFinding(RuleId.NAME_REQUIRED, CheckLevel.ERROR, "frontmatter 缺少 name")
+        )
     if not meta.description:
         findings.append(
-            RuleFinding("fm.description.required", CheckLevel.ERROR, "frontmatter 缺少 description")
+            RuleFinding(
+                RuleId.DESCRIPTION_REQUIRED, CheckLevel.ERROR, "frontmatter 缺少 description"
+            )
         )
     if meta.description:
         if not (DESC_MIN_CHARS <= len(meta.description) <= DESC_MAX_CHARS):
             findings.append(
                 RuleFinding(
-                    "fm.description.length",
+                    RuleId.DESCRIPTION_LENGTH,
                     CheckLevel.WARN,
                     f"description 长度 {len(meta.description)} 不在 "
                     f"{DESC_MIN_CHARS}-{DESC_MAX_CHARS} 区间",
@@ -269,7 +280,7 @@ def run_gate(snapshot: SkillSnapshot, ctx: GateContext) -> GateResult:
         if estimate_tokens(meta.description) > DESC_TOKEN_HINT:
             findings.append(
                 RuleFinding(
-                    "fm.description.tokens",
+                    RuleId.DESCRIPTION_TOKENS,
                     CheckLevel.INFO,
                     f"description 估算约 {estimate_tokens(meta.description)} tokens "
                     f"(> {DESC_TOKEN_HINT})，影响渐进披露",
@@ -277,32 +288,34 @@ def run_gate(snapshot: SkillSnapshot, ctx: GateContext) -> GateResult:
             )
     if meta.name and not is_kebab(meta.name):
         findings.append(
-            RuleFinding("fm.name.kebab", CheckLevel.WARN, f"name {meta.name!r} 不符合 kebab-case")
+            RuleFinding(RuleId.NAME_KEBAB, CheckLevel.WARN, f"name {meta.name!r} 不符合 kebab-case")
         )
     if meta.extra:
         unknown = sorted(k for k in meta.extra if k not in _CANONICAL_FM_KEYS)
         if unknown:
             findings.append(
-                RuleFinding("fm.unknown", CheckLevel.INFO, f"非标准字段: {', '.join(unknown)}")
+                RuleFinding(
+                    RuleId.UNKNOWN_FIELD, CheckLevel.INFO, f"非标准字段: {', '.join(unknown)}"
+                )
             )
 
     # ---- 结构规则 ----
     if not any(f.path == "SKILL.md" for f in files):
         findings.append(
-            RuleFinding("struct.skill_md", CheckLevel.ERROR, "包根缺少 SKILL.md")
+            RuleFinding(RuleId.SKILL_MD_MISSING, CheckLevel.ERROR, "包根缺少 SKILL.md")
         )
     known_paths = {f.path for f in files}
     for ref in _REF.findall(_body_of(files)):
         ref = ref.strip()
         if ref and ref not in known_paths:
             findings.append(
-                RuleFinding("struct.ref.missing", CheckLevel.WARN, f"正文引用的文件不存在: {ref}")
+                RuleFinding(RuleId.REF_MISSING, CheckLevel.WARN, f"正文引用的文件不存在: {ref}")
             )
     if any(not f.in_git for f in files):
         untracked = sorted(f.path for f in files if not f.in_git)
         findings.append(
             RuleFinding(
-                "asset.untracked",
+                RuleId.ASSET_UNTRACKED,
                 CheckLevel.WARN,
                 f"含超阈值未纳管资产（不参与版本管理与漂移检测）: {', '.join(untracked)}",
             )
@@ -312,11 +325,11 @@ def run_gate(snapshot: SkillSnapshot, ctx: GateContext) -> GateResult:
     for dep in ctx.dependencies:
         if dep not in ctx.known_slugs:
             findings.append(
-                RuleFinding("dep.missing", CheckLevel.ERROR, f"依赖的 Skill 不在库中: {dep}")
+                RuleFinding(RuleId.DEP_MISSING, CheckLevel.ERROR, f"依赖的 Skill 不在库中: {dep}")
             )
     if ctx.dependency_graph and _has_cycle(ctx.dependency_graph, snapshot.slug):
         findings.append(
-            RuleFinding("dep.cycle", CheckLevel.WARN, "依赖图存在循环")
+            RuleFinding(RuleId.DEP_CYCLE, CheckLevel.WARN, "依赖图存在循环")
         )
 
     has_error = any(f.level == CheckLevel.ERROR for f in findings)

@@ -556,7 +556,25 @@ class LocalEngine:
     def gate_of(self, slug: str) -> GateResult:
         """质量门禁（唯一判定入口，check 与 push 共用 —— NFR-10.5）。"""
         snapshot = self.git.snapshot_at(self._head(), slug)
-        return run_gate(snapshot, GateContext(known_slugs=self._all_slugs()))
+        return run_gate(snapshot, self._gate_context(snapshot))
+
+    def _gate_context(self, snapshot: SkillSnapshot) -> GateContext:
+        """门禁所需的外部事实（E-03.4：check / push / 编辑后校验共用同一份）。
+
+        依赖声明走 frontmatter `dependencies`（历史字段 `requires` 回落，口径见
+        services/check_service.declared_deps）；依赖图取库里已登记的 skill_dependencies 边。
+        声明读不懂时传空 —— 规则侧只报「库里确实没有」，不猜。
+        """
+        from skillos.services.check_service import declared_deps
+
+        declared = declared_deps(snapshot)
+        deps: tuple[str, ...] = tuple(declared) if isinstance(declared, list) else ()
+        graph: dict[str, list[str]] = {}
+        for owner, dep in self.db.list_dependency_edges():
+            graph.setdefault(owner, []).append(dep)
+        return GateContext(
+            known_slugs=self._all_slugs(), dependencies=deps, dependency_graph=graph
+        )
 
     def gate_all(self) -> dict[str, GateResult]:
         """批量门禁（Dashboard gate-summary 专用）：一次批量快照跑全部 skill。
@@ -602,7 +620,7 @@ class LocalEngine:
             head = self._head()
             snapshot = self.git.snapshot_at(head, slug)
             # 步骤 3：门禁（error 级拦截；--allow-gate-failure 只在 CLI，MCP 无此开关）
-            gate = run_gate(snapshot, GateContext(known_slugs=self._all_slugs()))
+            gate = run_gate(snapshot, self._gate_context(snapshot))
             if gate.has_error and not allow_gate_failure:
                 log.warning(
                     "gate_failed",
@@ -758,7 +776,7 @@ class LocalEngine:
             target = safe_path(self.paths.repo_root / "skills" / slug, rel_path)
             if current is not None and current_hash == hashlib.sha256(content).hexdigest():
                 # 幂等保存：内容未变（编辑器重复保存），不产生空 commit
-                gate = run_gate(snapshot, GateContext(known_slugs=self._all_slugs()))
+                gate = run_gate(snapshot, self._gate_context(snapshot))
                 log.info(
                     "file_write_committed",
                     skill_slug=slug, path=rel_path, idempotent=True,
@@ -780,10 +798,8 @@ class LocalEngine:
                 skill_slug=slug, path=rel_path, commit=commit[:12],
                 author=author, message=message,
             )
-            gate = run_gate(
-                self.git.snapshot_at(self._head(), slug),
-                GateContext(known_slugs=self._all_slugs()),
-            )
+            _snapshot = self.git.snapshot_at(self._head(), slug)
+            gate = run_gate(_snapshot, self._gate_context(_snapshot))
             log.info(
                 "file_write_committed",
                 skill_slug=slug, path=rel_path, commit=commit[:12],
@@ -867,10 +883,8 @@ class LocalEngine:
             self.db.upsert_skill(SkillRecord(
                 id="", slug=slug, name=display_name, description=description,
             ))
-            gate = run_gate(
-                self.git.snapshot_at(self._head(), slug),
-                GateContext(known_slugs=self._all_slugs()),
-            )
+            _snapshot = self.git.snapshot_at(self._head(), slug)
+            gate = run_gate(_snapshot, self._gate_context(_snapshot))
             log.info(
                 "create_completed",
                 skill_slug=slug, commit=commit[:12], author=author,
