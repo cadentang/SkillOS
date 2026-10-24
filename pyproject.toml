@@ -59,7 +59,7 @@ include = ["skillos*"]
 # 前端构建产物：构建期由 setup.py 的 build_py 钩子从 web/dist 拷入
 # （目录本身不入库，见根 .gitignore）。缺这条时 staged 的文件不会进 wheel，
 # `skillos serve` 装完打开首页即 404。
-skillos = ["web_dist/**/*"]
+skillos = ["web_dist/**/*", "**/*.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

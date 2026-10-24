@@ -1,0 +1,33 @@
+# Claude Code 会话 JSONL 适配器（N-11.4 / N-11.5 / V2-T7「路径即数据」）
+#
+# 新增 Runtime = 加一份本文件，不改引擎代码（与 adapters/ 的 T12 同一条纪律）。
+# 注意：本文件随包分发（pyproject package-data），改结构要保持向后兼容。
+runtime: claude-code
+
+# 自动探测根（N-11.9③：配置了手动路径时整段跳过）
+autodetect:
+  - "{home}/.claude/projects"
+
+session_glob: "**/*.jsonl"
+
+# 行 JSON → 归属器输入
+usage_field_map:
+  event_type: "type"
+  # 只有这些 type 的行带 usage（assistant 行）；把 user 行也算进来 token 直接翻倍
+  usage_event_types: ["assistant"]
+  input_tokens: "message.usage.input_tokens"
+  output_tokens: "message.usage.output_tokens"
+  cache_read: "message.usage.cache_read_input_tokens"
+  timestamp: "timestamp"
+
+# 会话行 → skill 关联（N-11.4：路径命中部署目录才归，未命中不强行归属）
+skill_match:
+  - scan_fields:
+      - "message.content"
+      - "toolUse"
+      - "toolUseResult"
+    # {deploy_roots} 由引擎按本机已注册 Runtime 的部署根展开（每项以 / 结尾）。
+    # Python re 不允许同名分组重复出现，故两条来源合并成一个可选前缀；
+    # 没有可用部署根时改用 pattern_without_roots（只认仓库内的 skills/<slug>/）。
+    pattern: "(?:{deploy_roots}|skills)/(?P<slug>[A-Za-z0-9-]+)/"
+    pattern_without_roots: "skills/(?P<slug>[A-Za-z0-9-]+)/"
