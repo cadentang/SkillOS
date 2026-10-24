@@ -141,18 +141,27 @@ def pick_release(repo: str, tag: str | None, token: str | None) -> dict | None:
     return None
 
 
-def download(url: str, dest: Path, token: str | None, kind: str, retries: int = 3) -> None:
+def download(url: str, dest: Path, token: str | None, kind: str, retries: int = 3,
+             expected: int | None = None) -> None:
     """kind=artifact：两段式（带 token 拿 302 Location，再**不带鉴权头**取 CDN）。
     kind=release：普通跟随重定向（匿名单，任何鉴权头都会被 CDN 拒）。
 
     两者都带**续传重试**：GitHub 的 CDN 会在大文件慢速传输时直接掐连接
     （实测 RemoteDisconnected），此时用 Range 从断点接着下，不必从头再来。
+
+    `expected` 是 API 声明的大小。**必须校验**：连接被掐断时 urlopen 可能正常
+    EOF 而不抛异常（实测 linux 包停在正好 60 MiB 仍被当成功），只有比大小才发现。
     """
     import urllib.error
 
     last = ""
     for attempt in range(1, retries + 1):
         have = dest.stat().st_size if dest.exists() else 0
+        if expected is not None and have > expected:
+            dest.unlink()                       # 超出预期 = 上一轮脏数据，重来
+            have = 0
+        if expected is not None and have == expected:
+            return
         try:
             if kind == "release":
                 headers = {"User-Agent": "skillos-release-pull"}
@@ -163,8 +172,11 @@ def download(url: str, dest: Path, token: str | None, kind: str, retries: int = 
                     partial = r.status == 206 and have > 0
                     with open(dest, "ab" if partial else "wb") as f:
                         shutil.copyfileobj(r, f, 1 << 20)
-                return
-            _artifact_stream(url, token, dest, have)
+            else:
+                _artifact_stream(url, token, dest, have)
+            size = dest.stat().st_size
+            if expected is not None and size != expected:
+                raise OSError(f"大小不符：{size:,} ≠ {expected:,}（{size / 1048576:.1f} MB）")
             return
         except SystemExit:
             raise
@@ -362,7 +374,8 @@ def main() -> None:
         with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
             futs = {
                 pool.submit(download, it["url"], tmp / f"{it['name']}.raw",
-                            token or None, it["kind"], max(1, args.retries)): it
+                            token or None, it["kind"], max(1, args.retries),
+                            it["size"]): it
                 for it in items
             }
             errors: list[str] = []
@@ -396,6 +409,14 @@ def main() -> None:
                 dest = tmp / Path(member).name
                 dest.write_bytes(z.read(member))
                 staged[dest.name] = dest
+
+        # 结构校验：截断的 zip 也可能「下载成功」，必须真的打开一次
+        for nm, p in sorted(staged.items()):
+            try:
+                with zipfile.ZipFile(p) as z:
+                    _ = len(z.namelist())
+            except zipfile.BadZipFile as e:
+                die(f"{nm} 不是完整 zip（{p.stat().st_size:,} 字节）：{e} —— 拒绝归档。")
 
         # 版本一致性：4 个交付 zip 的版本号必须一致，且与 tag 对齐
         vers = {DELIVERY_ZIP_RE.fullmatch(n).group(1)
