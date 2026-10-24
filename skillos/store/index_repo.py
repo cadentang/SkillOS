@@ -23,6 +23,7 @@ from skillos.store.models import (
     SkillCheck,
     SkillDependency,
     SkillTag,
+    SkillUsageEvent,
     SyncRecord,
 )
 
@@ -78,6 +79,10 @@ class IndexStore(Protocol):
     # 设备侧开关（V2-T1）：value 为 JSON 字符串
     def get_setting(self, key: str) -> str | None: ...
     def set_setting(self, key: str, value: str) -> None: ...
+    # 调用遥测（N-11.1）：事件表是聚合的唯一事实源
+    def add_usage_event(self, *, session_id: str, runtime: str, skill_id: str, op: str,
+                        via: str, duration_ms: int | None, ok: bool,
+                        param_digest: str | None) -> None: ...
     # 检查结果（E-02.6）：折旧维度一行一个，写入前先清该 skill 的旧 decay 行
     def replace_decay_checks(self, skill_id: str, rows: list[dict]) -> int: ...
     # 依赖图（E-02.1 反向入度）：(声明方 slug, 被依赖 slug)
@@ -225,6 +230,17 @@ class SqliteIndexStore:
         else:
             row.value = value
             row.updated_at = _now()
+        self._s.commit()
+
+    # ---- 调用遥测（N-11.1）----
+
+    def add_usage_event(self, *, session_id: str, runtime: str, skill_id: str, op: str,
+                        via: str, duration_ms: int | None, ok: bool,
+                        param_digest: str | None) -> None:
+        self._s.add(SkillUsageEvent(
+            id=_ulid(), session_id=session_id, runtime=runtime, skill_id=skill_id,
+            op=op, via=via, duration_ms=duration_ms, ok=ok, param_digest=param_digest,
+        ))
         self._s.commit()
 
     # ---- 检查结果（E-02.6）----

@@ -36,6 +36,7 @@ from skillos.core.logging import (
     setup_logging,
 )
 from skillos.services.engine import LocalEngine, default_env, resolve_home
+from skillos.services.usage_service import VIA_MCP
 
 mcp = FastMCP("skillos", instructions=(
     "Skill OS —— 个人 AI Skill 操作系统。写入类工具默认 dry_run=true，"
@@ -80,6 +81,24 @@ def _threaded(fn: Callable[[], dict]) -> Any:
         reset_op_context()
 
 
+def _record_usage(slug: str, op: str, ok: bool = True) -> None:
+    """L1 采集（N-01）：MCP 是本地进程内入口，via=mcp。
+
+    采集失败**不影响工具返回**（N-11.4 的反向要求）；无 slug 的调用由 record 自己丢弃。
+    """
+    try:
+        get_engine().usage.record(slug, op, via=VIA_MCP, ok=ok)
+    except Exception:  # noqa: BLE001 —— 遥测不得让工具失败
+        log.warning("usage_record_failed", op=op, skill_slug=slug)
+
+
+def _recorded(result: dict, slug: str, op: str) -> dict:
+    """在 worker 线程里「先采集、再返回」——避免在事件循环线程写库。"""
+    if isinstance(result, dict):
+        _record_usage(slug, op, bool(result.get("ok")))
+    return result
+
+
 # ---------------------------------------------------------------- 只读工具
 
 
@@ -115,7 +134,7 @@ def _list_skills_impl() -> dict:
 @mcp.tool()
 async def skillos_get_skill(slug: str) -> dict:
     """取单个 Skill：元数据 + 文件树 + SKILL.md 正文（FR-3.12：内容实时读 canonical）。"""
-    return await _threaded(lambda: _get_skill_impl(slug))
+    return await _threaded(lambda: _recorded(_get_skill_impl(slug), slug, "get_skill"))
 
 
 def _get_skill_impl(slug: str) -> dict:
@@ -143,7 +162,7 @@ def _get_skill_impl(slug: str) -> dict:
 @mcp.tool()
 async def skillos_status(slug: str | None = None) -> dict:
     """漂移矩阵。slug 省略 = 全部；给出 = 该 Skill 的逐 runtime 状态。"""
-    return await _threaded(lambda: _status_impl(slug))
+    return await _threaded(lambda: _recorded(_status_impl(slug), slug or "", "status"))
 
 
 def _status_impl(slug: str | None) -> dict:
@@ -187,7 +206,9 @@ def _check_impl(slug: str) -> dict:
 @mcp.tool()
 async def skillos_version_log(slug: str, limit: int = 20) -> dict:
     """版本历史（git log，FR-2.2.7 溯源时间轴同源数据）。"""
-    return await _threaded(lambda: _version_log_impl(slug, limit))
+    return await _threaded(
+        lambda: _recorded(_version_log_impl(slug, limit), slug, "version_log")
+    )
 
 
 def _version_log_impl(slug: str, limit: int) -> dict:
@@ -212,7 +233,9 @@ async def skillos_sync_push(slug: str, targets: list[str] | None = None,
     返回的每个 target 含三态判据：`action`（skip / write）+ `wrote` + `would_write`。
     dry_run=true 时 wrote 恒为 false，**不能据此判断"无需同步"**。
     """
-    return await _threaded(lambda: _push_impl(slug, targets, dry_run))
+    return await _threaded(
+        lambda: _recorded(_push_impl(slug, targets, dry_run), slug, "sync_push")
+    )
 
 
 def _push_impl(slug: str, targets: list[str] | None, dry_run: bool) -> dict:
@@ -289,7 +312,9 @@ async def skillos_sync_pull(slug: str, runtime: str, dry_run: bool = True) -> di
     双向分歧（canonical 也前进过）→ CONFLICT，交人工在 Web 处理（FR-1.3.5）。
     预览与真跑共用同一判据（FR-1.3.7）。
     """
-    return await _threaded(lambda: _pull_impl(slug, runtime, dry_run))
+    return await _threaded(
+        lambda: _recorded(_pull_impl(slug, runtime, dry_run), slug, "sync_pull")
+    )
 
 
 def _pull_impl(slug: str, runtime: str, dry_run: bool) -> dict:
@@ -326,7 +351,7 @@ async def skillos_upgrade(slug: str, strategy: str = "merge", dry_run: bool = Tr
 
     当前版本：上游源管理未交付，显式返回 NOT_IMPLEMENTED（红线 7：不静默成功）。
     """
-    return await _threaded(lambda: _upgrade_impl(slug))
+    return await _threaded(lambda: _recorded(_upgrade_impl(slug), slug, "upgrade"))
 
 
 def _upgrade_impl(slug: str) -> dict:

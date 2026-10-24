@@ -41,6 +41,7 @@ from skillos.services.engine import (
     resolve_home,
 )
 from skillos.services.locking import write_lock
+from skillos.services.usage_service import VIA_WEB
 
 log = get_logger("skillos.daemon")
 
@@ -97,6 +98,13 @@ class TaskExecutor:
     # 已自加写锁（FR-1.0.17），这里再加会形成同进程双 FileLock 自锁
     # （msvcrt 层互斥 → 30s 死锁，实测踩坑）。tag_create 直接调 git（无引擎锁）→ 此处加。
     WRITE_OPS = frozenset({"tag_create"})
+    # N-01.1：只有「skill 级」调用计入遥测。仪表盘类（scan/status/gate_summary/logs）
+    # 与诊断类（check/decay）不计 —— 否则「零调用」语义会被自己的面板污染。
+    USAGE_OPS = frozenset({
+        "version_log", "diff", "file_tree", "file_history", "file_read", "file_write",
+        "push", "pull", "rollback", "resolve_conflict", "skill_create", "skill_delete",
+        "tag_create",
+    })
 
     def __init__(self, engine: LocalEngine) -> None:
         self.engine = engine
@@ -107,6 +115,11 @@ class TaskExecutor:
         if op not in WS_TASK_OPS:
             return {"ok": False, "error": {"code": "INVALID_INPUT",
                                            "message": f"非白名单操作: {op}"}}
+        result = self._run(op, params)
+        self._record_usage(op, params, result)
+        return result
+
+    def _run(self, op: str, params: dict) -> dict:
         try:
             if op in self.WRITE_OPS:
                 with write_lock(self.engine.paths.lock_dir, timeout=LOCK_TIMEOUT_S):
@@ -115,6 +128,23 @@ class TaskExecutor:
         except Exception as e:  # noqa: BLE001 —— result 信封承载错误，不让 daemon 崩
             log.exception("task %s failed", op)
             return {"ok": False, "error": {"code": "IO", "message": str(e)}}
+
+    def _record_usage(self, op: str, params: dict, result: dict) -> None:
+        """L1 采集（N-01 / V2-T2）：Web 侧发起的 skill 级调用在这里一次收口。
+
+        遥测**不得影响任务结果**：失败只记日志（N-11.4 的反向要求）。
+        """
+        if op not in self.USAGE_OPS:
+            return
+        slug = str(params.get("slug") or "")
+        if not slug:
+            return
+        try:
+            self.engine.usage.record(
+                slug, op, via=VIA_WEB, ok=bool(result.get("ok")), runtime="web",
+            )
+        except Exception:  # noqa: BLE001 —— 采集失败绝不影响任务返回
+            log.warning("usage_record_failed", op=op, slug=slug)
 
     def _dispatch(self, op: str, params: dict) -> dict:
         engine = self.engine

@@ -27,8 +27,10 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy.orm import Session
 
-if TYPE_CHECKING:  # 仅类型：check_service 反向依赖 engine 的类型会成环
+if TYPE_CHECKING:  # 仅类型：这些服务反向依赖 engine 的类型会成环
     from skillos.services.check_service import CheckService
+    from skillos.services.settings_service import SettingsService
+    from skillos.services.usage_service import UsageService
 
 from skillos.core.algorithm.adapters.agents import AgentsAdapter
 from skillos.core.algorithm.adapters.base import RuntimeAdapter
@@ -1737,6 +1739,29 @@ class LocalEngine:
         binding.baseline_source = "distributed"
         binding.last_synced_at = datetime.now(UTC)
         self.db.upsert_binding(binding)
+
+    # ------------------------------------------------ 设备开关 / 调用遥测（V2-T1 / N-01）
+    @property
+    def settings(self) -> SettingsService:
+        """设备侧开关（V2-T1）：采集开关、上报开关、L2 路径表都从这里读。"""
+        svc = getattr(self, "_settings_service", None)
+        if svc is None:
+            from skillos.services.settings_service import SettingsService
+
+            svc = SettingsService(self.db)
+            self._settings_service = svc
+        return svc
+
+    @property
+    def usage(self) -> UsageService:
+        """调用遥测采集（N-01）：**所有入口唯一的写事件口**（V2-T2）。"""
+        svc = getattr(self, "_usage_service", None)
+        if svc is None:
+            from skillos.services.usage_service import UsageService
+
+            svc = UsageService(self.db, self.settings)
+            self._usage_service = svc
+        return svc
 
     # ------------------------------------------------ 折旧度量（E-02，FR-1.0.23）
     @property

@@ -27,6 +27,7 @@ from skillos.core.logging import (
     get_logger,
     setup_logging,
 )
+from skillos.services.usage_service import VIA_CLI
 
 # 05 P0-2：中文 + Windows 控制台默认 cp936，输出中文 skill 名必抛 UnicodeEncodeError。
 # 入口处强制 UTF-8，必须先于任何输出执行。
@@ -105,6 +106,14 @@ def _make_engine(repo: str | None):
             db_path=repo_root.parent / "skillos.db",
         )
     return LocalEngine(paths, home=home)
+
+
+def _record_usage(engine, slug: str, op: str, ok: bool = True) -> None:
+    """L1 采集（N-01）：CLI 是本地进程内入口，via=cli。失败只记日志，不影响命令结果。"""
+    try:
+        engine.usage.record(slug, op, via=VIA_CLI, ok=ok)
+    except Exception:  # noqa: BLE001 —— 遥测不得让命令失败
+        log.warning("usage_record_failed", op=op, skill_slug=slug)
 
 
 def _all_skill_rows(engine):
@@ -323,6 +332,8 @@ def status(
         if c.has_untracked_assets and label == "SYNCED":
             label = "SYNCED*"  # FR-1.0.20：含未纳管资产禁止显示纯 SYNCED
         rows.append({"skill": slug, "runtime": c.runtime_key, "state": label})
+    if skill:   # 单 skill 查看算一次调用；全量矩阵是仪表盘，不计（N-01.1）
+        _record_usage(engine, skill, "status")
     if json_output:
         console.print_json(json.dumps(rows, ensure_ascii=False))
         return
@@ -383,6 +394,7 @@ def push(
             console.print(f"  [red]✗ 门禁拦截（--allow-gate-failure 可继续）: "
                           f"{report.outcomes[0].detail}[/red]")
             raise typer.Exit(EXIT_FAIL)
+        _record_usage(engine, s, "push", ok=report.ok)
         _print_report(report)
         if not report.ok:
             failed = True
@@ -410,6 +422,7 @@ def pull(
     except ValueError as e:
         console.print(f"[red]✗ {e}[/red]")
         raise typer.Exit(EXIT_FAIL) from None
+    _record_usage(engine, slug, "pull", ok=bool(result.get("ok")))
     if not result.get("ok"):
         console.print(f"[red]✗ {result.get('error_code')}: {result.get('detail')}[/red]")
         if result.get("error_code") == "CONFLICT":
@@ -447,6 +460,7 @@ def versions(
     if row is None:
         console.print(f"[red]未纳管的 skill: {slug}[/red]")
         raise typer.Exit(EXIT_FAIL)
+    _record_usage(engine, slug, "versions")
     table = Table(title=f"{slug} 版本历史")
     table.add_column("commit")
     table.add_column("时间")
