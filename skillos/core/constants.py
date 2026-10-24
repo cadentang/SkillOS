@@ -56,3 +56,27 @@ DRIFT_SEVERITY: dict[str, int] = {
     "MODIFIED": 5,
     "CONFLICT": 6,
 }
+
+# ---------------------------------------------------------------- 健康度（E-01）
+# FR-1.0.24 / E-01.1：score = 100 − 10×error − 3×warn − 8×degraded_decay_dimensions，下限 0。
+# E-01.2：**禁止做成 DB / 配置可调** —— 健康度是缓存可重算值，运行时可配会让历史分数
+# 不可比（分不清是资产变了还是权重变了）。调权重 = 改代码 + 提交说明。
+HEALTH_WEIGHTS: dict[str, int] = {
+    "error": 10,
+    "warn": 3,
+    "degraded_decay": 8,
+}
+HEALTH_SCORE_MAX: int = 100
+HEALTH_SCORE_FLOOR: int = 0
+
+# ---------------------------------------------------------------- 折旧（E-02）
+# E-02.2：无引用 90 天判陈旧；被引用 ≥1 次放宽到 180 天（被引用的资产不算僵尸）。
+# decay 状态集只有 ok/degraded/unknown，无 warn 档。
+STALENESS_DEGRADED_DAYS: int = 90
+STALENESS_DEGRADED_DAYS_RELAXED: int = 180
+
+# ---------------------------------------------------------------- 门禁阈值（E-03）
+# E-03.3：原先散落在 checks.py 顶部，集中到此处。
+DESC_MIN_CHARS: int = 30
+DESC_MAX_CHARS: int = 500
+DESC_TOKEN_HINT: int = 150

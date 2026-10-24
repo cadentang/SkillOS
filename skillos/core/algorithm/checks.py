@@ -15,6 +15,15 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from skillos.core.constants import (
+    DESC_MAX_CHARS,
+    DESC_MIN_CHARS,
+    DESC_TOKEN_HINT,
+    HEALTH_SCORE_FLOOR,
+    HEALTH_SCORE_MAX,
+    HEALTH_WEIGHTS,
+    STALENESS_DEGRADED_DAYS,
+)
 from skillos.core.model import SkillSnapshot
 
 
@@ -63,10 +72,15 @@ RULES: frozenset[str] = frozenset(
     }
 )
 
-# description 长度区间（fm.description.length）
-DESC_MIN_CHARS = 30
-DESC_MAX_CHARS = 500
-DESC_TOKEN_HINT = 150  # fm.description.tokens 提示阈值
+# description 长度区间与 token 提示阈值已归位 core/constants.py（E-03.3），此处只引用。
+
+# 折旧三维（E-02）：健康度合成时按维度计 degraded 次数
+DECAY_DIMENSIONS: tuple[str, str, str] = (
+    "staleness",
+    "dependency_broken",
+    "upstream_divergence",
+)
+_DECAY_STATUSES: frozenset[str] = frozenset({"ok", "degraded", "unknown"})
 
 _KEBAB = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 # 正文中的相对路径引用：markdown 链接 / 图片
@@ -117,17 +131,53 @@ def _body_of(files) -> str:
         return ""
 
 
+def _is_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _decay_status(decay: Mapping[str, object], dim: str) -> str:
+    """取单个折旧维度的状态（ok / degraded / unknown）。
+
+    兼容两代形态：E-02 的结构化结果（`{"staleness": "degraded", ...}`）与
+    P3 的扁平结果（`{"staleness_days": 12.5, "dependency_broken": [...]}`）。
+    判不出来一律 unknown —— 不猜（NFR-10.4）。
+    """
+    raw = decay.get(dim)
+    if isinstance(raw, str) and raw in _DECAY_STATUSES:
+        return raw
+    if dim == "staleness":
+        days = decay.get("staleness_days")
+        if not _is_number(days):
+            return "unknown"
+        return "degraded" if days >= STALENESS_DEGRADED_DAYS else "ok"  # type: ignore[operator]
+    if dim == "dependency_broken":
+        broken = decay.get(dim)
+        if not isinstance(broken, (list, tuple)):
+            return "unknown"   # 声明格式不可解析 / 字段缺失：不猜（E-02.4）
+        return "degraded" if len(broken) > 0 else "ok"
+    return "unknown"           # upstream_divergence：E-08 启用前恒 unknown（E-02.5）
+
+
+def _decay_value(decay: Mapping[str, object]) -> Mapping[str, object]:
+    value = decay.get("value")
+    return value if isinstance(value, Mapping) else {}
+
+
 def summarize_health(
     findings: Iterable[RuleFinding | Mapping[str, str]],
     decay: Mapping[str, object] | None = None,
 ) -> dict:
-    """健康度汇总（FR-1.0.24 退化形态：门禁结果计数，砍单第 8 项）。
+    """健康度汇总（FR-1.0.24 / E-01）。
 
+    - E-01.1：`score = 100 − 10×error − 3×warn − 8×degraded_decay_dimensions`，
+      下限 0（error 很多时不下溢为负）。权重只从 `HEALTH_WEIGHTS` 取（E-01.2）。
+    - E-01.3：unknown 维度**不加减分**，但必须把 unknown 数报出来（`unknown_dimensions`），
+      UI 据此显示「未知 N 项」。
     - T11 红线：返回值只用于展示与排序，禁止参与放行判定——
-      放行只有 GateResult.has_error 一个入口（NFR-10.5）。若把计数接入
+      放行只有 GateResult.has_error 一个入口（NFR-10.5）。若把分数接入
       放行逻辑，"调权重即可放行"，治理叙事当场失效（04 §13.13）。
-    - NFR-10.3 可下钻：计数与 findings / decay 原始值一一对应，
-      UI 点击计数即过滤到对应 findings 行，禁止只给不可解释的数字。
+    - NFR-10.3 可下钻：`deductions` 逐条给出扣分项与次数，UI 点击即过滤到对应
+      findings / decay 行，禁止只给不可解释的数字。
     - findings 同时接受 RuleFinding 与序列化 dict（daemon / API 路径），
       两种形态同一口径，避免展示层与判定层数量对不上。
     - decay 字段缺失时给 None / 0，不得读 updated_at 之类的 DB 列兜底
@@ -142,16 +192,52 @@ def summarize_health(
             warn_count += 1
         elif level == CheckLevel.INFO:
             info_count += 1
-    broken = decay.get("dependency_broken") if decay else None
-    if not isinstance(broken, (list, tuple)):
-        broken = []
-    staleness = decay.get("staleness_days") if decay else None
+
+    decay_map: Mapping[str, object] = decay or {}
+    statuses = {dim: _decay_status(decay_map, dim) for dim in DECAY_DIMENSIONS}
+    degraded_dims = [dim for dim, status in statuses.items() if status == "degraded"]
+    unknown_dims = [dim for dim, status in statuses.items() if status == "unknown"]
+
+    deductions: list[dict] = []
+    if error_count:
+        deductions.append(
+            {"kind": "error", "count": error_count,
+             "points": HEALTH_WEIGHTS["error"] * error_count}
+        )
+    if warn_count:
+        deductions.append(
+            {"kind": "warn", "count": warn_count,
+             "points": HEALTH_WEIGHTS["warn"] * warn_count}
+        )
+    for dim in degraded_dims:
+        deductions.append(
+            {"kind": "decay", "dimension": dim, "count": 1,
+             "points": HEALTH_WEIGHTS["degraded_decay"]}
+        )
+    score = max(HEALTH_SCORE_FLOOR, HEALTH_SCORE_MAX - sum(d["points"] for d in deductions))
+
+    value = _decay_value(decay_map)
+    staleness_days = decay_map.get("staleness_days")
+    if not _is_number(staleness_days):
+        staleness_days = value.get("days_since")
+    broken = decay_map.get("dependency_broken")
+    if isinstance(broken, (list, tuple)):
+        broken_count = len(broken)
+    else:
+        missing = value.get("missing_deps")
+        broken_count = len(missing) if isinstance(missing, (list, tuple)) else 0
+
     return {
+        "score": score,
         "error_count": error_count,
         "warn_count": warn_count,
         "info_count": info_count,
-        "staleness_days": staleness if isinstance(staleness, (int, float)) else None,
-        "dependency_broken_count": len(broken),
+        "degraded_decay_dimensions": len(degraded_dims),
+        "unknown_dimensions": len(unknown_dims),
+        "unknown_dimension_names": unknown_dims,
+        "deductions": deductions,
+        "staleness_days": staleness_days if _is_number(staleness_days) else None,
+        "dependency_broken_count": broken_count,
     }
 
 

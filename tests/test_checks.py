@@ -183,13 +183,15 @@ class TestSummarizeHealth:
 
     def test_empty_findings_all_zero(self) -> None:
         h = summarize_health([])
-        assert h == {
-            "error_count": 0,
-            "warn_count": 0,
-            "info_count": 0,
-            "staleness_days": None,
-            "dependency_broken_count": 0,
-        }
+        assert h["error_count"] == 0
+        assert h["warn_count"] == 0
+        assert h["info_count"] == 0
+        assert h["staleness_days"] is None
+        assert h["dependency_broken_count"] == 0
+        # 无 decay 输入 => 三维全 unknown（不猜），但**不扣分**（E-01.3）
+        assert h["score"] == 100
+        assert h["degraded_decay_dimensions"] == 0
+        assert h["unknown_dimensions"] == 3
 
     def test_accepts_dict_form(self) -> None:
         """daemon / API 路径拿到的是序列化 dict，两种形态必须同一口径。"""
