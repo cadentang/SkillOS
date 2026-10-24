@@ -2,11 +2,13 @@
 
 三个维度（`docs/11` E-02.1~E-02.5）：
 
-| 维度 | 判据 | 状态集 |
-|---|---|---|
-| `staleness` | 距 canonical 最近一次 commit 的天数 vs 阈值（被引用 ≥1 次放宽一档） | ok / degraded / unknown |
-| `dependency_broken` | 声明依赖在库内缺失，或在 binding 所在 Runtime 无有效 binding | ok / degraded / unknown |
-| `upstream_divergence` | E-08 上游跟踪启用前恒 unknown | ok / degraded / unknown |
+| 维度 | 判据 |
+|---|---|
+| `staleness` | 距 canonical 最近一次 commit 的天数 vs 阈值（被引用 ≥1 次放宽一档） |
+| `dependency_broken` | 声明依赖在库内缺失，或在 binding 所在 Runtime 无有效 binding |
+| `upstream_divergence` | E-08 上游跟踪启用前恒 unknown |
+
+三维状态集统一为 `ok / degraded / unknown`（无 warn 档，E-02.2）。
 
 **不猜原则（NFR-10.4）**：输入缺失或无法解析时一律 `unknown`，不做任何"给个默认值"
 的兜底。unknown 在健康度合成里不加减分（E-01.3），但必须能报出来。
