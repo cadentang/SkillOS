@@ -52,9 +52,13 @@ def _migrate(engine: Engine) -> None:
             ("discover_only", "ALTER TABLE runtimes ADD COLUMN discover_only BOOLEAN DEFAULT 0"),
         ],
         # E-02.6：折旧结果与门禁 findings 同表，用 scope 区分；value 存原始测量值
+        # N-03.5：ruleset_hash 必须在这里显式补 —— 否则只剩"CHECK 重建顺带带出来"
+        # 这一条偶然路径；一旦某库的 CHECK 已是新值却缺此列，_migrate 就补不到，
+        # ORM 查询直接 `no such column`。
         "skill_checks": [
             ("scope", "ALTER TABLE skill_checks ADD COLUMN scope TEXT NOT NULL DEFAULT 'gate'"),
             ("value", "ALTER TABLE skill_checks ADD COLUMN value TEXT"),
+            ("ruleset_hash", "ALTER TABLE skill_checks ADD COLUMN ruleset_hash TEXT"),
         ],
         # L2 会话适配器回填的 token 估算值（N-11.3）：落在事件行上，聚合才能重算
         "skill_usage_events": [
@@ -100,6 +104,7 @@ def _migrate(engine: Engine) -> None:
                     if col not in existing:
                         conn.exec_driver_sql(ddl)
         _upgrade_skill_checks_constraints(conn, engine.dialect.name)
+        _upgrade_change_requests_constraints(conn, engine.dialect.name)
 
 
 def _upgrade_skill_checks_constraints(conn, dialect_name: str) -> None:
@@ -127,7 +132,9 @@ def _upgrade_skill_checks_constraints(conn, dialect_name: str) -> None:
         create_sql = create_sql.replace(
             "CREATE TABLE skill_checks", f"CREATE TABLE {new_table}", 1
         )
-        cols = "id, skill_id, version_id, scope, rule, level, message, value, at"
+        # 列清单必须含 ruleset_hash：上面的 _migrate 已先把它 ALTER 进来，
+        # 漏拷会让已存在的指纹在重建时被静默清空。
+        cols = "id, skill_id, version_id, scope, rule, level, message, value, ruleset_hash, at"
         conn.exec_driver_sql(create_sql)
         conn.exec_driver_sql(
             f"INSERT INTO {new_table} ({cols}) SELECT {cols} FROM skill_checks"
@@ -146,4 +153,61 @@ def _upgrade_skill_checks_constraints(conn, dialect_name: str) -> None:
     conn.exec_driver_sql(
         "ALTER TABLE skill_checks ADD CONSTRAINT ck_check_scope "
         "CHECK (scope IN ('gate','decay'))"
+    )
+
+
+_CR_STATUS_NEW = "status IN ('open','approved','rejected','merged','closed')"
+
+
+def _upgrade_change_requests_constraints(conn, dialect_name: str) -> None:
+    """把 change_requests.status 的 CHECK 从三态升到五态（E-05.1 / 迁移 0006）。
+
+    走 `create_all` 的库（本地 + 云端开发库）对已存在的表不会改 CHECK —— 没有这一步，
+    `approve` / `reject` 写库时直接撞 `CHECK constraint failed: ck_cr_status`，
+    审批链路在真实库上是**硬阻断**，不是配置问题。
+
+    只换约束、不动数据：旧值 `open/merged/closed` 在新值域内仍合法，语义未变。
+    SQLite 不支持 ALTER CHECK，只能重建表；Postgres 直接换约束。
+    """
+    from sqlalchemy.schema import CreateTable
+
+    from skillos.store import models
+
+    if dialect_name == "sqlite":
+        row = conn.exec_driver_sql(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='change_requests'"
+        ).fetchone()
+        if row is None:
+            return  # 表还没建（create_all 会带新约束）
+        ddl = (row[0] or "").lower()
+        if "'approved'" in ddl and "'rejected'" in ddl:
+            return
+        new_table = "change_requests__new"
+        create_sql = str(CreateTable(models.ChangeRequest.__table__).compile(conn))
+        create_sql = create_sql.replace(
+            "CREATE TABLE change_requests", f"CREATE TABLE {new_table}", 1
+        )
+        # 只搬"两边都有"的列：静态清单在以后加列时会静默漏拷，这里按实际列求交集。
+        old_cols = {
+            r[1]
+            for r in conn.exec_driver_sql("PRAGMA table_info(change_requests)").fetchall()
+        }
+        cols = ", ".join(
+            c.name for c in models.ChangeRequest.__table__.columns if c.name in old_cols
+        )
+        conn.exec_driver_sql(create_sql)
+        conn.exec_driver_sql(
+            f"INSERT INTO {new_table} ({cols}) SELECT {cols} FROM change_requests"
+        )
+        conn.exec_driver_sql("DROP TABLE change_requests")
+        conn.exec_driver_sql(f"ALTER TABLE {new_table} RENAME TO change_requests")
+        return
+
+    # postgres / 其它：约束可替换
+    conn.exec_driver_sql(
+        "ALTER TABLE change_requests DROP CONSTRAINT IF EXISTS ck_cr_status"
+    )
+    conn.exec_driver_sql(
+        "ALTER TABLE change_requests ADD CONSTRAINT ck_cr_status "
+        f"CHECK ({_CR_STATUS_NEW})"
     )
