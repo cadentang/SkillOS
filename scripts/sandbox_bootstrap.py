@@ -41,7 +41,10 @@ def _install_seed(root: Path, seed_src: Path) -> None:
     seed_dst = root / ".skillos-seed"
     if seed_dst.exists():
         shutil.rmtree(seed_dst)
-    shutil.copytree(seed_src / "runtime", seed_dst / "runtime")
+    # 整棵搬：`runtime/` 之外还必须带 `seed.json`（自证清单）与 `conflict/`（CONFLICT
+    # 样例）。只搬 runtime 会让 reset 的"部署自证"永久跳过（verified 恒 false）、
+    # 冲突剧本无声消失（矩阵永远全 synced）—— 2026-10-25 实测踩到。
+    shutil.copytree(seed_src, seed_dst)
     # 首次启动：seed → runtime deploy 根（entrypoint 语义，同测试 fixture）
     runtimes = sorted(
         p.name for p in (seed_dst / "runtime").iterdir() if p.is_dir()

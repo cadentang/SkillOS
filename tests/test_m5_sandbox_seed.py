@@ -195,3 +195,35 @@ class TestResetApi:
                             headers={"Authorization": f"Bearer {token}"})
         assert status.status_code == 200
         assert status.json()["data"]["status"] == "running"
+
+
+def _load_bootstrap_script():
+    spec = iu.spec_from_file_location("sandbox_bootstrap", "scripts/sandbox_bootstrap.py")
+    mod = iu.module_from_spec(spec)  # type: ignore[arg-type]
+    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    return mod
+
+
+class TestInstallSeedEntrypoint:
+    """容器首次启动走的是 `_install_seed`，不是 fixture 里那条捷径。
+
+    2026-10-25 实测：`_install_seed` 只拷 `runtime/`，把 `seed.json` 与
+    `conflict/` 丢在门外 ⇒ reset 回 `restored=True` 但 `verified=False`、
+    矩阵永远全 synced（E-06 的 CONFLICT 剧本无声消失）。fixture 直接把 seed
+    build 进 `.skillos-seed`，绕过了这一步，所以老测试一条都没发现。
+    """
+
+    def test_carries_manifest_and_conflict_overlay(self, tmp_path: Path) -> None:
+        seed_src = tmp_path / "seed"
+        _load_seed_script().build(seed_src, list(_RUNTIMES))
+        root = tmp_path / "root"
+        root.mkdir()
+
+        _load_bootstrap_script()._install_seed(root, seed_src)
+
+        dst = root / ".skillos-seed"
+        assert (dst / "seed.json").is_file()
+        assert (dst / "conflict").is_dir()
+        assert (dst / "runtime" / _RUNTIMES[0]).is_dir()
+        # 自证有据可依（否则 reset 只会报 "seed.json 缺失，跳过自证"）
+        assert _make_engine(root)._seed_manifest() is not None
