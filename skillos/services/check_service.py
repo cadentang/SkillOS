@@ -19,7 +19,14 @@ import re
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
+from skillos.core.algorithm.checks import (
+    CheckLevel,
+    GateContext,
+    GateResult,
+    run_gate,
+)
 from skillos.core.algorithm.decay import (
     FORMAT_UNKNOWN,
     DecayResult,
@@ -27,7 +34,18 @@ from skillos.core.algorithm.decay import (
     FormatUnknown,
     evaluate_decay,
 )
-from skillos.core.model import SkillSnapshot
+from skillos.core.algorithm.rule_engine import (
+    RuleRunner,
+    filter_security,
+    finding_rows,
+)
+from skillos.core.algorithm.rule_engine import (
+    invalid_rows as invalid_rule_rows,
+)
+from skillos.core.model import FileEntry, SkillSnapshot
+
+if TYPE_CHECKING:
+    from skillos.services.rule_service import RuleService
 
 # 正文里指向同库另一个 skill 的相对路径：`../<slug>/`（从 skills/<slug>/ 出发）
 # 或 `skills/<slug>/`（从仓库根出发）。只认 slug 字形，避免把任意目录当成 skill。
@@ -110,14 +128,86 @@ class ReferenceIndex:
 
 
 class CheckService:
-    """折旧度量的编排层：取证 → evaluate_decay → 落库 skill_checks(scope=decay)。"""
+    """检查编排：内置门禁 + 自定义规则 + 折旧，取证 → 判定 → 落库（一个入口）。
 
-    def __init__(self, *, git, store, head: Callable[[], str]) -> None:
+    `docs/12` §6.1：判定仍全在 `core/algorithm`（checks / rule_engine / decay），
+    本层只负责把它们拼起来、过滤白名单、写 `skill_checks`。
+    """
+
+    def __init__(self, *, git, store, head: Callable[[], str],
+                 rules: RuleService | None = None,
+                 gate_context: Callable[[SkillSnapshot], GateContext] | None = None,
+                 extra_files: Callable[[str], Iterable[FileEntry]] | None = None) -> None:
         self.git = git
         self.store = store
         self._head = head
         self._snapshots: dict[str, SkillSnapshot] | None = None
         self._references: ReferenceIndex | None = None
+        self.rules = rules
+        self._gate_context = gate_context
+        self._extra_files = extra_files
+        self._runner = RuleRunner()
+
+    # ---------------------------------------------------------------- 门禁（含自定义规则）
+
+    def gate(self, snapshot: SkillSnapshot, ctx: GateContext, *,
+             security_only: bool = False,
+             include_untracked: bool = False) -> GateBundle:
+        """内置 11 条 + 自定义规则，唯一判定入口（NFR-10.5 / N-03.7）。
+
+        自定义 error **参与拦截**（与内置同语义）；ignore 命中的不产出 finding，
+        但会作为 info 行留痕（N-08.2 可审计）。
+        """
+        base = run_gate(snapshot, ctx)
+        findings = list(base.findings)
+        invalid_rows: list[dict] = []
+        ignored_rows: list[dict] = []
+        custom_count = 0
+        ruleset_hash = ""
+
+        if self.rules is not None:
+            loaded = self.rules.load()
+            ruleset_hash = self.rules.ruleset_hash()
+            # 编译失败的规则：info 落库，不静默跳过（N-03.4）
+            invalid_rows = invalid_rule_rows(loaded.invalid)
+            rules = list(loaded.rules)
+            if security_only:
+                rules = filter_security(rules)
+            extra: tuple[FileEntry, ...] = ()
+            if include_untracked and self._extra_files is not None:
+                extra = tuple(self._extra_files(snapshot.slug))
+            custom = self._runner.run(rules, snapshot, extra_files=extra)
+            custom_count = len(custom)
+            for item in custom:
+                hit = self.rules.ignored(item.rule, item.path or "")
+                if hit is not None:
+                    ignored_rows.append({
+                        "rule": item.rule,
+                        "level": "info",
+                        "message": f"已按白名单过滤（{hit.reason}）：{item.message}",
+                        "value": None,
+                    })
+                    continue
+                findings.append(item)
+
+        result = GateResult(
+            findings=findings,
+            has_error=any(f.level == CheckLevel.ERROR for f in findings),
+        )
+        return GateBundle(result=result, ruleset_hash=ruleset_hash,
+                          invalid=invalid_rows, ignored=ignored_rows,
+                          custom_count=custom_count)
+
+    def _snapshot_of(self, slug: str) -> SkillSnapshot:
+        snapshot = self._all_snapshots().get(slug)
+        if snapshot is None:
+            raise ValueError(f"Skill 不在 canonical 中: {slug}")
+        return snapshot
+
+    def _context(self, snapshot: SkillSnapshot) -> GateContext:
+        if self._gate_context is not None:
+            return self._gate_context(snapshot)
+        return GateContext()
 
     # ---------------------------------------------------------------- 取证
 
@@ -191,13 +281,18 @@ class CheckService:
             raise ValueError(f"Skill 不在 canonical 中: {slug}")
         declared = declared_deps(snapshot)
         known = set(snapshots)
+        # E-08.3：有 upstream_sources 记录才参与上游维度；没有记录 → None → unknown
+        # （不按"没记录 = 最新"猜，NFR-10.4）
+        record = self.store.get_skill_by_slug(slug)
+        source = None if record is None else self.store.get_upstream_source(record.id)
+        upstream_status = None if source is None else source.status
         result = evaluate_decay(
             days_since_last_commit=self._days_since_last_commit(slug),
             inbound_refs=self.references().of(slug),
             declared_deps=declared,
             resolved_slugs=known,
             dependency_bindings_ok=self._dependency_bindings_ok(slug, declared, known),
-            upstream_status=None,  # E-02.5：E-08 启用前恒 unknown
+            upstream_status=upstream_status,
         )
         if result.value.get("clock_skew"):
             # 时钟回拨按 0 处理（E-02 边界）；纯函数不记日志，告警在这里落地
@@ -206,7 +301,42 @@ class CheckService:
             get_logger(__name__).warning("decay_clock_skew", skill_slug=slug)
         return result
 
+    def gate_of(self, slug: str, *, security_only: bool = False,
+                include_untracked: bool = False) -> GateBundle:
+        """单 skill 门禁（含自定义规则）：给 CLI / push 前置 / 详情页用。"""
+        snapshot = self._snapshot_of(slug)
+        return self.gate(snapshot, self._context(snapshot),
+                         security_only=security_only,
+                         include_untracked=include_untracked)
+
+    def check(self, slug: str, *, security_only: bool = False,
+              include_untracked: bool = True) -> CheckReport:
+        """一次完整检查：门禁（含自定义规则）+ 折旧，两者都落库。
+
+        `include_untracked=True` 是 N-08.3 的显式例外：超阈值未纳管资产
+        （`in_git=false`，字节不进哈希）**仍参与安全扫描** —— 密钥藏在大文件里
+        同样要拦，代价是显式 check 时会多读一次磁盘（push 前置不传这个开关）。
+        """
+        snapshot = self._snapshot_of(slug)
+        bundle = self.gate(snapshot, self._context(snapshot),
+                           security_only=security_only,
+                           include_untracked=include_untracked)
+        self.record_gate(slug, bundle)
+        decay = self.decay(slug)
+        self.record_decay(slug, decay)
+        return CheckReport(gate=bundle.result, decay=decay, bundle=bundle)
+
     # ---------------------------------------------------------------- 落库
+
+    def record_gate(self, slug: str, bundle: GateBundle) -> int:
+        """写 skill_checks(scope=gate)：findings + 无效规则 + 白名单留痕，一次替换。"""
+        record = self.store.get_skill_by_slug(slug)
+        if record is None:
+            return 0
+        rows = finding_rows(bundle.result.findings) + bundle.invalid + bundle.ignored
+        return self.store.replace_gate_checks(
+            record.id, rows, ruleset_hash=bundle.ruleset_hash or None,
+        )
 
     def record_decay(self, slug: str, result: DecayResult) -> int:
         """写 skill_checks(scope=decay)：一行一个维度（E-02.6），返回写入行数。"""
@@ -214,6 +344,26 @@ class CheckService:
         if record is None:
             return 0
         return self.store.replace_decay_checks(record.id, decay_rows(result.to_dict()))
+
+
+@dataclass(frozen=True)
+class GateBundle:
+    """一次门禁的完整产物：内置 + 自定义 findings、规则集指纹、无效规则、白名单留痕。"""
+
+    result: GateResult
+    ruleset_hash: str
+    invalid: list[dict]
+    ignored: list[dict]
+    custom_count: int
+
+
+@dataclass(frozen=True)
+class CheckReport:
+    """一次完整检查的结果（CLI / daemon op / 详情页共用）。"""
+
+    gate: GateResult
+    decay: DecayResult
+    bundle: GateBundle
 
 
 def decay_rows(payload: Mapping[str, object]) -> list[dict]:

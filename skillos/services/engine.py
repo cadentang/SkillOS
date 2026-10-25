@@ -29,7 +29,10 @@ from sqlalchemy.orm import Session
 
 if TYPE_CHECKING:  # 仅类型：这些服务反向依赖 engine 的类型会成环
     from skillos.services.check_service import CheckService
+    from skillos.services.report_service import ReportService
+    from skillos.services.rule_service import RuleService
     from skillos.services.settings_service import SettingsService
+    from skillos.services.similarity_service import SimilarityService
     from skillos.services.usage_service import UsageService
 
 from skillos.core.algorithm.adapters.agents import AgentsAdapter
@@ -37,7 +40,7 @@ from skillos.core.algorithm.adapters.base import RuntimeAdapter
 from skillos.core.algorithm.adapters.claude import ClaudeAdapter
 from skillos.core.algorithm.adapters.codex import CodexAdapter
 from skillos.core.algorithm.adapters.workbuddy import WorkBuddyAdapter
-from skillos.core.algorithm.checks import GateContext, GateResult, is_kebab, run_gate
+from skillos.core.algorithm.checks import GateContext, GateResult, is_kebab
 from skillos.core.algorithm.drift import classify, classify_imported
 from skillos.core.algorithm.hash import aggregate_hash, list_content_files
 from skillos.core.algorithm.identity import IdentityCandidate
@@ -56,7 +59,7 @@ from skillos.core.fs.safe_path import path_key, safe_path
 from skillos.core.fs.scan import scan_roots
 from skillos.core.fs.version import GitError, GitRepo
 from skillos.core.logging import get_logger
-from skillos.core.model import DriftReport, DriftState, RootSpec, SkillSnapshot
+from skillos.core.model import DriftReport, DriftState, FileEntry, RootSpec, SkillSnapshot
 from skillos.services.locking import write_lock
 from skillos.store.db import init_schema, make_engine, make_session_factory, sqlite_url
 from skillos.store.index_repo import SkillQuery, SkillRecord, SqliteIndexStore
@@ -199,7 +202,7 @@ class LocalEngine:
     # ------------------------------------------------------------ init
 
     def init_env(self) -> list[str]:
-        """初始化 git 仓库 + SQLite + runtimes 表。幂等。"""
+        """初始化 git 仓库 + SQLite + runtimes 表 + 规则集（N-08.1）。幂等。"""
         self.paths.repo_root.mkdir(parents=True, exist_ok=True)
         self.paths.db_path.parent.mkdir(parents=True, exist_ok=True)
         if not (self.paths.repo_root / ".git").exists():
@@ -211,7 +214,16 @@ class LocalEngine:
                 runtime_id=adapter.key, key=adapter.key,
                 adapter_key=adapter.key, root_path=root, scope="user",
             )
-        return ["git 仓库就绪", "SQLite 索引就绪（缓存，可重建）", "runtimes 已登记四端部署根"]
+        lines = ["git 仓库就绪", "SQLite 索引就绪（缓存，可重建）",
+                 "runtimes 已登记四端部署根"]
+
+        # N-08.1：随包安全规则**拷贝**进仓库（不是引用），首启即随 git 版本化。
+        # 已存在则不动 —— 用户可能改过级别或删过规则，覆盖等于把用户的决定改回去。
+        copied = self.rules.ensure_builtin()
+        if copied:
+            self.git.commit([".skillos/rules"], "chore: 初始化安全规则集（N-08.1）")
+            lines.append(f"安全规则集已入库（{len(copied)} 个文件）")
+        return lines
 
     # ------------------------------------------------------------ scan / import
 
@@ -555,10 +567,26 @@ class LocalEngine:
     def _all_slugs(self) -> frozenset[str]:
         return frozenset(r.slug for r in self.db.list_skills(SkillQuery(limit=10000)))
 
-    def gate_of(self, slug: str) -> GateResult:
-        """质量门禁（唯一判定入口，check 与 push 共用 —— NFR-10.5）。"""
-        snapshot = self.git.snapshot_at(self._head(), slug)
-        return run_gate(snapshot, self._gate_context(snapshot))
+    def gate_of(self, slug: str, *, security_only: bool = False,
+                include_untracked: bool = False) -> GateResult:
+        """质量门禁（唯一判定入口，check 与 push 共用 —— NFR-10.5）。
+
+        `include_untracked` 默认 False：push 前置在热路径上，扫盘读大文件太贵；
+        显式 check / 详情页才传 True（N-08.3 的大文件例外在那里生效）。
+        """
+        return self.checks.gate_of(
+            slug, security_only=security_only, include_untracked=include_untracked,
+        ).result
+
+    def _gate_of_snapshot(self, snapshot: SkillSnapshot) -> GateResult:
+        """写路径统一门禁（E-03.4 / NFR-10.5）：与 check 走**同一个**实现。
+
+        不能直接调 `run_gate` —— 那会绕过自定义规则（N-03.1）与 security 规则集，
+        造成"CLI check 报错、push 照样放行"的信任事故（该分叉曾被
+        `test_gate_consistency` 抓到，见其注释）。
+        """
+        bundle = self.checks.gate(snapshot, self._gate_context(snapshot))
+        return bundle.result
 
     def _gate_context(self, snapshot: SkillSnapshot) -> GateContext:
         """门禁所需的外部事实（E-03.4：check / push / 编辑后校验共用同一份）。
@@ -593,8 +621,12 @@ class LocalEngine:
         except Exception:
             return {}  # canonical 仓库异常：全空统计，doctor 会报
         ctx = GateContext(known_slugs=known)
-        return {slug: run_gate(snap, ctx) for slug, snap in snapshots.items()
-                if slug in known}
+        # 自定义 error 也算门禁 error（N-03.7 同源）：否则 Dashboard 的
+        # 「门禁 error」与 push 实际拦截口径不一致
+        return {
+            slug: self.checks.gate(snap, ctx).result
+            for slug, snap in snapshots.items() if slug in known
+        }
 
     def push_skill(
         self,
@@ -622,7 +654,7 @@ class LocalEngine:
             head = self._head()
             snapshot = self.git.snapshot_at(head, slug)
             # 步骤 3：门禁（error 级拦截；--allow-gate-failure 只在 CLI，MCP 无此开关）
-            gate = run_gate(snapshot, self._gate_context(snapshot))
+            gate = self._gate_of_snapshot(snapshot)
             if gate.has_error and not allow_gate_failure:
                 log.warning(
                     "gate_failed",
@@ -708,6 +740,14 @@ class LocalEngine:
                     replaced_count=sum(1 for o in result.outcomes if o.ok),
                     held_back_count=held_back_count,
                 )
+                # N-07.5：重新分发即恢复 —— 弃用只是把 bindings 收掉了，push 成功就清标记
+                if self.db.set_skill_deprecated(row.id, False):
+                    self.db.record_sync(
+                        skill_id=row.id, runtime_id=None, action="push",
+                        from_state="deprecated", to_state="synced",
+                        detail={"event": "restore"}, by="cli",
+                    )
+                    log.info("deprecate_lifted", skill_slug=slug, reason="N-07.5 重新分发")
             else:
                 log.warning(
                     "sync_push_failed",
@@ -778,7 +818,7 @@ class LocalEngine:
             target = safe_path(self.paths.repo_root / "skills" / slug, rel_path)
             if current is not None and current_hash == hashlib.sha256(content).hexdigest():
                 # 幂等保存：内容未变（编辑器重复保存），不产生空 commit
-                gate = run_gate(snapshot, self._gate_context(snapshot))
+                gate = self._gate_of_snapshot(snapshot)
                 log.info(
                     "file_write_committed",
                     skill_slug=slug, path=rel_path, idempotent=True,
@@ -801,7 +841,7 @@ class LocalEngine:
                 author=author, message=message,
             )
             _snapshot = self.git.snapshot_at(self._head(), slug)
-            gate = run_gate(_snapshot, self._gate_context(_snapshot))
+            gate = self._gate_of_snapshot(_snapshot)
             log.info(
                 "file_write_committed",
                 skill_slug=slug, path=rel_path, commit=commit[:12],
@@ -819,17 +859,26 @@ class LocalEngine:
     # ------------------------------------------------ CRUD：新建（P3，FR-2.1.7）
 
     def create_skill(self, slug: str, *, name: str = "", description: str,
+                     category: str = "", template: str = "minimal",
                      author: str = "web <web@skillos.local>") -> dict:
-        """新建 Skill：canonical 模板落盘 + git commit + 索引（FR-2.1.7）。
+        """新建 Skill：canonical 模板落盘 + git commit + 索引（FR-2.1.7 / E-07）。
 
         - slug 必须 kebab-case（与 fm.name.kebab 同口径）；占用判定走 path_key
-          归一化（NFR-7.4：Demo/demo 归一化同键，拒绝而非静默并存）。
+          归一化，但**错误码分开**（E-07.4）：同名 → `NAME_CONFLICT`，
+          仅大小写/归一化不同 → `NAME_COLLISION`（NFR-7.4 拒绝而非静默并存）。
         - description 必填：fm.description.required 是 error 级门禁，
           创建即违规的 Skill 没有意义（写操作不猜用户意图，红线 16 同源）。
         - canonical 目录已存在而索引没有 → 报错不猜（磁盘与索引不一致）。
-        - 不建 binding：未分发状态，首次 push 时建立（04 §2.2.5）。
+        - `template` ∈ 内置三模板（E-07.2）：骨架文件集由模板决定，写完立刻跑 gate
+          并把 findings 一起返回（E-07.5，模板破损即模板 bug）。
+        - 不建 binding：未分发状态，首次 push 时建立（04 §2.2.5 / E-07.3）。
         - 溯源走 git log（FR-1.0.22）；不写 sync_records（action 白名单无 create）。
         """
+        if template not in CREATE_TEMPLATES:
+            raise SkillValidationError(
+                "VALIDATION",
+                f"未知模板 {template!r}，可选：{', '.join(CREATE_TEMPLATES)}",
+            )
         log.info(
             "create_started",
             skill_slug=slug, author=author,
@@ -853,40 +902,56 @@ class LocalEngine:
             )
         display_name = name.strip() or slug
         with write_lock(self.paths.lock_dir, operation="create_skill"):
-            existing = {
-                path_key(r.slug)
-                for r in self.db.list_skills(SkillQuery(limit=10000))
-            }
-            if path_key(slug) in existing:
+            rows = self.db.list_skills(SkillQuery(limit=10000))
+            same_case = {r.slug for r in rows}
+            normalized = {path_key(r.slug): r.slug for r in rows}
+            if slug in same_case:
                 log.warning(
                     "create_rejected",
-                    skill_slug=slug, error_code="SLUG_EXISTS",
+                    skill_slug=slug, error_code="NAME_CONFLICT",
+                )
+                raise SkillValidationError("NAME_CONFLICT", f"slug 已存在: {slug}")
+            if path_key(slug) in normalized:
+                # 归一化同键但字面不同：判为碰撞而不是"重名"，前端提示要能区分（NFR-7.4）
+                log.warning(
+                    "create_rejected",
+                    skill_slug=slug, error_code="NAME_COLLISION",
                 )
                 raise SkillValidationError(
-                    "SLUG_EXISTS", f"slug 已存在（含大小写归一化比对）: {slug}"
+                    "NAME_COLLISION",
+                    f"与已有 slug 仅大小写/Unicode 归一化不同: {normalized[path_key(slug)]}",
                 )
             dest = self.paths.repo_root / "skills" / slug / "SKILL.md"
             if dest.parent.exists():
                 # 索引里没有但磁盘有：重建守卫同源语义——判断不了就报错，不许猜
                 log.warning(
                     "create_rejected",
-                    skill_slug=slug, error_code="SLUG_EXISTS",
+                    skill_slug=slug, error_code="NAME_CONFLICT",
                     reason="canonical 目录已存在但未纳管",
                 )
                 raise SkillValidationError(
-                    "SLUG_EXISTS", f"canonical 目录已存在但未纳管: skills/{slug}"
+                    "NAME_CONFLICT", f"canonical 目录已存在但未纳管: skills/{slug}"
                 )
-            content = _render_skill_md(display_name, description)
+            content = _render_skill_md(
+                display_name, description, category=category or None,
+                with_deps=template == "with-deps",
+            )
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(content)
+            # E-07.2：模板附带骨架文件（相对于 skills/<slug>/）
+            for rel, text in _TEMPLATE_FILES[template].items():
+                extra = safe_path(dest.parent, rel)
+                extra.parent.mkdir(parents=True, exist_ok=True)
+                extra.write_text(text, encoding="utf-8")
             commit = self.git.commit(
                 [f"skills/{slug}"], f"skillos: create {slug}", author=author
             )
             self.db.upsert_skill(SkillRecord(
                 id="", slug=slug, name=display_name, description=description,
+                category=category or None,
             ))
             _snapshot = self.git.snapshot_at(self._head(), slug)
-            gate = run_gate(_snapshot, self._gate_context(_snapshot))
+            gate = self._gate_of_snapshot(_snapshot)
             log.info(
                 "create_completed",
                 skill_slug=slug, commit=commit[:12], author=author,
@@ -1048,6 +1113,125 @@ class LocalEngine:
             )
             return {"ok": True, "commit": commit, "removals": removals}
 
+    # ------------------------------------------------ 弃用回收（N-07.3 / N-07.5）
+
+    def deprecate_skill(self, slug: str, *, dry_run: bool = True,
+                        confirmed_removals: list[str] | None = None,
+                        author: str = "web <web@skillos.local>") -> dict:
+        """回收落选方（N-07.3）：**不删 canonical**，只回收 runtime 部署副本 + 打弃用标记。
+
+        为什么不是 delete_skill：N-07 的语义是"合并重复"——落选方的正文/历史仍有价值
+        （可随时恢复，N-07.5）。所以走软状态，canonical 一条不动。
+
+        安全语义（FR-1.0.26 ② / 红线 16，一个不少）：
+        - removals 清单先列出（`runtime_key:path`），未逐条确认前整体拒绝；
+        - 回收前把每个部署目录整份复制进 `backups_dir`（可撤销，比"没有备份"强）；
+        - runtime 已停用 / 部署根读不到 → **跳过并回报**，不猜着删；
+        - 落 sync_records（NFR-9）；恢复 = 重新 push（N-07.5）。
+        """
+        row = self.db.get_skill_by_slug(slug)
+        if row is None:
+            raise SkillValidationError("NOT_FOUND", f"未纳管的 skill: {slug}")
+        adapters = {a.key: a for a in self._enabled_adapters()}
+
+        def _deploy_of(runtime_key: str) -> Path | None:
+            adapter = adapters.get(runtime_key)
+            if adapter is None:
+                return None
+            return adapter.resolve_root("user", home=self.home) / slug
+
+        def _plan() -> dict:
+            removals: list[str] = []
+            skipped: list[str] = []
+            for binding in self.db.list_bindings(row.id):
+                deploy = _deploy_of(binding.runtime_id)
+                if deploy is None:
+                    skipped.append(binding.runtime_id)   # runtime 停用：判断不了，不猜
+                    continue
+                if not deploy.is_dir():
+                    continue                              # 副本本就没了：无需回收
+                for entry in list_content_files(deploy):
+                    removals.append(f"{binding.runtime_id}:{entry.path}")
+            return {"removals": sorted(removals), "skipped": sorted(skipped)}
+
+        plan = _plan()
+        if dry_run:
+            log.info("deprecate_removals_listed", skill_slug=slug,
+                     removals_count=len(plan["removals"]))
+            return {"ok": True, "dry_run": True, "slug": slug,
+                    "removals": plan["removals"],
+                    "skipped_runtimes": plan["skipped"]}
+
+        with write_lock(self.paths.lock_dir, operation="deprecate_skill"):
+            plan = _plan()   # 锁内重算（FR-1.3.7：预览即真跑会遇到的一切）
+            removals = plan["removals"]
+            confirmed = set(confirmed_removals or [])
+            if set(removals) != confirmed:
+                log.warning("write_policy_rejected", op="deprecate", skill_slug=slug,
+                            error_code="REMOVALS_UNCONFIRMED",
+                            missing_count=len([p for p in removals if p not in confirmed]))
+                return {"ok": False, "error_code": "REMOVALS_UNCONFIRMED",
+                        "detail": "回收将从 Runtime 目录删除下列文件，须逐条确认后重试",
+                        "removals": [p for p in removals if p not in confirmed]}
+
+            stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
+            backup_root = self.paths.backups_dir / f"deprecate-{slug}-{stamp}"
+            by_runtime: dict[str, list[str]] = {}
+            for item in removals:
+                runtime_key, _, rel = item.partition(":")
+                by_runtime.setdefault(runtime_key, []).append(rel)
+            for runtime_key in sorted(by_runtime):
+                deploy = _deploy_of(runtime_key)
+                if deploy is None or not deploy.is_dir():
+                    continue
+                shutil.copytree(deploy, backup_root / runtime_key, dirs_exist_ok=True)
+
+            for item in removals:
+                runtime_key, _, rel = item.partition(":")
+                deploy = _deploy_of(runtime_key)
+                if deploy is None:
+                    continue
+                target = safe_path(deploy, rel)
+                if not target.is_file():
+                    continue     # 并发消失：不阻断其余回收（与 push 的 held_back 语义一致）
+                target.unlink()
+            for runtime_key in sorted(by_runtime):
+                deploy = _deploy_of(runtime_key)
+                if deploy is None or not deploy.is_dir():
+                    continue
+                for sub in sorted(deploy.rglob("*"), key=lambda x: len(x.parts), reverse=True):
+                    if sub.is_dir():
+                        try:
+                            sub.rmdir()
+                        except OSError:
+                            pass
+                try:
+                    deploy.rmdir()
+                except OSError:
+                    pass
+
+            self.db.delete_bindings(row.id)
+            changed = self.db.set_skill_deprecated(row.id, True)
+            # action 取值受 `ck_sync_action` 约束（NFR-9 既定枚举），这里不扩枚举：
+            # 回收属于「相似对决策的落地」，用 resolve + detail.event 区分（可查可筛）
+            self.db.record_sync(
+                skill_id=row.id, runtime_id=None, action="resolve",
+                from_state=None, to_state="deprecated",
+                detail={"event": "deprecate", "removals": removals,
+                        "backup": str(backup_root),
+                        "skipped_runtimes": plan["skipped"]},
+                by=author,
+            )
+            log.info("deprecate_completed", skill_slug=slug,
+                     recovered_count=len(removals), changed=changed)
+            return {"ok": True, "deprecated": True, "slug": slug,
+                    "removals": removals, "backup": str(backup_root),
+                    "skipped_runtimes": plan["skipped"]}
+
+    def deprecated_skills(self) -> list[str]:
+        """已弃用的 slug 清单（前端显示"恢复"入口用，N-07.5）。"""
+        return self.db.list_deprecated_slugs()
+
     def sandbox_reset(self) -> dict:
         """恢复预置演示数据（FR-3.10 / P7）。仅沙盒模式可达。
 
@@ -1141,12 +1325,119 @@ class LocalEngine:
                     f"{[(o.error_code, o.detail) for o in report.outcomes]}"
                 )
             restored.append(r.slug)
+
+        # 5. 冲突样例（E-06 GWT：矩阵里要能看到剧本要求的 CONFLICT）
+        #    必须在 push 之后 —— 先覆盖会被 push 冲掉，等于样例不存在。
+        #    注意 `drift.classify` 的 CONFLICT 要求**两边都动过**
+        #    （disk_dirty ∧ content_new）：只改磁盘只能得到 MODIFIED，
+        #    所以这里同时让 canonical 前进一次（模拟"仓库那边也改了"）。
+        conflict_root = self.home / ".skillos-seed" / "conflict"
+        conflict_slugs: list[str] = []
+        if conflict_root.is_dir():
+            for rt in self.db.list_runtimes():
+                src = conflict_root / rt.key
+                if not src.is_dir():
+                    continue
+                dst = Path(rt.root_path)
+                dst.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(src, dst, dirs_exist_ok=True)
+                conflict_slugs.extend(
+                    p.name for p in src.iterdir() if p.is_dir()
+                )
+            if conflict_slugs:
+                for slug in sorted(set(conflict_slugs)):
+                    dest = self.paths.repo_root / "skills" / slug / "SKILL.md"
+                    if not dest.is_file():
+                        continue
+                    dest.write_bytes(
+                        dest.read_bytes()
+                        + "\n## 仓库侧改动\n\n演示 CONFLICT 用：仓库这边也前进了一步。\n".encode()
+                    )
+                    self.git.commit(
+                        [f"skills/{slug}"], f"skillos: sandbox conflict sample {slug}",
+                    )
+
+        # 6. 建基线：重算漂移（classify 无副作用，读一次即自洽）+ 跑一遍门禁
+        gate_errors: list[str] = []
+        for slug in restored:
+            gate = self.gate_of(slug)
+            if gate.has_error:
+                gate_errors.append(slug)
+
         commit = self._head()
+        manifest = self._seed_manifest()
+        diffs: list[str] = []
+        if manifest is None:
+            # 没有清单就没法自证 —— 显式回报，不假装通过（E-06.1 要求产物带版本）
+            diffs = ["seed.json 缺失：无法核对 seed 声明（跳过自证）"]
+            log.warning("sandbox_seed_unverifiable", reason="seed.json missing", diffs=diffs)
+        else:
+            diffs = self.verify_seed(manifest)
+
         log.info(
             "sandbox_reset_completed",
             restored_count=len(restored), commit=commit[:12],
+            seed_version=(manifest or {}).get("seed_version"),
+            verified=not diffs, diffs_count=len(diffs),
         )
-        return {"restored": True, "skills": sorted(restored), "commit": commit}
+        if diffs and manifest is not None:
+            # E-06.3：不一致 → 失败并打印差异项（崩溃是好事，静默错才是灾难）
+            log.error("sandbox_seed_verify_failed", diffs=diffs)
+            raise RuntimeError("沙盒自证失败：" + "；".join(diffs))
+        return {
+            "restored": True, "skills": sorted(restored), "commit": commit,
+            "seed_version": (manifest or {}).get("seed_version"),
+            "verified": not diffs, "diffs": diffs,
+            "gate_errors": sorted(set(gate_errors)),
+        }
+
+    # ------------------------------------------------ 沙盒自证（E-06.1 / E-06.3）
+
+    def _seed_manifest(self) -> dict | None:
+        """读 `<home>/.skillos-seed/seed.json`（`build_sandbox_seed.py` 产物）。"""
+        path = self.home / ".skillos-seed" / "seed.json"
+        if not path.is_file():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            log.warning("sandbox_seed_manifest_invalid", path=str(path), error=str(e))
+            return None
+        return data if isinstance(data, dict) else None
+
+    def verify_seed(self, manifest: dict) -> list[str]:
+        """回读清单与 seed 声明逐项比对（E-06.3），返回差异项（空 = 一致）。
+
+        三项都要核：**skill 总数**、**漂移态抽样**、**门禁数据**。
+        只核总数会漏掉"数量对但状态错"的静默失效。
+        """
+        expect = manifest.get("expect") or {}
+        diffs: list[str] = []
+        rows = self.db.list_skills(SkillQuery(limit=10000))
+        want_count = expect.get("skill_count")
+        if isinstance(want_count, int) and len(rows) != want_count:
+            diffs.append(f"skill 总数 {len(rows)} ≠ seed 声明 {want_count}")
+
+        # 矩阵格只带 skill_id（DriftReport），自证按 slug 声明 → 先建映射
+        slug_of = {row.id: row.slug for row in rows}
+        matrix = self.status_matrix()
+        states = {
+            (slug_of.get(c.skill_id, c.skill_id), c.runtime_key): str(c.state)
+            for c in matrix
+        }
+        for slug, per_runtime in (expect.get("states") or {}).items():
+            for runtime_key, want in per_runtime.items():
+                got = states.get((slug, runtime_key), "<不存在>")
+                if got != str(want):
+                    diffs.append(f"漂移态 {slug}/{runtime_key} = {got} ≠ seed 声明 {want}")
+
+        want_gate = expect.get("gate_has_error")
+        if want_gate is False:
+            for row in rows:
+                gate = self.gate_of(row.slug)
+                if gate.has_error:
+                    diffs.append(f"门禁 {row.slug} 存在 error 级 finding（seed 声明应全绿）")
+        return diffs
 
     # ------------------------------------------------ 版本管理（P4，FR-2.2.8 / 1.0.22 / 1.0.26）
 
@@ -1766,14 +2057,144 @@ class LocalEngine:
     # ------------------------------------------------ 折旧度量（E-02，FR-1.0.23）
     @property
     def checks(self) -> CheckService:
-        """检查编排（取证 + 落库在 services/check_service，判定在 core/algorithm/decay）。"""
+        """检查编排（内置门禁 + 自定义规则 + 折旧，判定在 core/algorithm）。"""
         svc = getattr(self, "_check_service", None)
         if svc is None:
             from skillos.services.check_service import CheckService
 
-            svc = CheckService(git=self.git, store=self.db, head=self._head)
+            svc = CheckService(
+                git=self.git, store=self.db, head=self._head,
+                rules=self.rules,
+                gate_context=self._gate_context,
+                extra_files=self.extra_file_entries,
+            )
             self._check_service = svc
         return svc
+
+    # ------------------------------------------------ 规则集（N-03 / N-08）
+    @property
+    def rules(self) -> RuleService:
+        """仓库内规则集（`.skillos/rules/`）：按文件指纹缓存，首启拷贝安全规则。"""
+        svc = getattr(self, "_rule_service", None)
+        if svc is None:
+            from skillos.services.rule_service import RuleService
+
+            svc = RuleService(self.paths.repo_root)
+            self._rule_service = svc
+        return svc
+
+    # ------------------------------------------------ 相似检测（E-04 / N-07）
+    @property
+    def similarity(self) -> SimilarityService:
+        """相似比对编排（纯算法在 core/algorithm/similarity）。"""
+        svc = getattr(self, "_similarity_service", None)
+        if svc is None:
+            from skillos.services.similarity_service import SimilarityService
+
+            svc = SimilarityService(
+                store=self.db,
+                snapshots=lambda: self.git.snapshot_all(self._head()),
+            )
+            self._similarity_service = svc
+        return svc
+
+    def run_similarity(self) -> int:
+        """重算相似对（幂等覆盖）。返回参与比对的 skill 数，失败不掩盖。"""
+        return self.similarity.run().skills
+
+    def extra_file_entries(self, slug: str) -> list[FileEntry]:
+        """canonical 工作区里**未纳管**的文件（N-08.3 安全扫描的显式例外）。
+
+        超阈值资产 `in_git=false`、字节不进哈希，但密钥藏在大文件里一样要拦 ——
+        所以安全扫描要读盘。上限 `ASSET_MAX_BYTES × 4`：再大的文件正则会慢到失去意义，
+        跳过时记日志（不静默），由 ignore/人工路径处理。
+        """
+        from skillos.core.constants import ASSET_MAX_BYTES
+
+        root = self.paths.repo_root / "skills" / slug
+        if not root.is_dir():
+            return []
+        limit = ASSET_MAX_BYTES * 4
+        entries: list[FileEntry] = []
+        for path in sorted(root.rglob("*")):
+            if not path.is_file():
+                continue
+            try:
+                if path.stat().st_size > limit:
+                    log.warning("security_scan_skipped_large_file",
+                                skill_slug=slug, path=path.name, limit_bytes=limit)
+                    continue
+                entries.append(FileEntry(
+                    path=path.relative_to(root).as_posix(),
+                    content=path.read_bytes(), in_git=False,
+                ))
+            except OSError:
+                log.warning("security_scan_read_failed", skill_slug=slug, path=path.name)
+        return entries
+
+    # ------------------------------------------------ 体检报告（N-02）
+    @property
+    def reports(self) -> ReportService:
+        """体检报告编排（只读聚合 + 落库，不改状态）。"""
+        svc = getattr(self, "_report_service", None)
+        if svc is None:
+            from skillos.services.report_service import ReportService
+
+            svc = ReportService(self.db, self.report_snapshot)
+            self._report_service = svc
+        return svc
+
+    def report_snapshot(self) -> dict:
+        """报告快照：漂移矩阵 + 落库检查行（归一化到 slug，判定口径仍在 core）。
+
+        空仓库（HEAD 不存在）时漂移**无意义**：没有 canonical 版本就没有"偏离"可言。
+        这时给空集合 + 显式原因，而不是让 `git rev-parse` 抛错把整份报告打掉 ——
+        但也绝不能当成"全部同步"（那是把"没法判断"说成"没问题"）。
+        """
+        slug_by_id = self._slug_by_id()
+        checks = [
+            {
+                "slug": slug_by_id.get(row.skill_id, row.skill_id),
+                "scope": row.scope, "rule": row.rule, "level": row.level,
+                "message": row.message, "value": row.value,
+            }
+            for row in self.db.list_checks()
+        ]
+        if not self.git.has_commits():
+            return {
+                "states": [], "checks": checks,
+                "drift_unavailable": "仓库还没有提交（HEAD 不存在），本期不统计漂移",
+            }
+        states = [
+            {
+                "slug": slug_by_id.get(cell.skill_id, cell.skill_id),
+                "runtime_key": cell.runtime_key,
+                "state": cell.state.name if hasattr(cell.state, "name") else str(cell.state),
+            }
+            for cell in self.status_matrix()
+        ]
+        return {"states": states, "checks": checks}
+
+    def all_slugs(self) -> list[str]:
+        """全部 skill slug（Dashboard「零调用」需要全集减去有调用集合）。"""
+        return sorted(self._all_slugs())
+
+    def _slug_by_id(self) -> dict[str, str]:
+        """DB id → slug（检查行/漂移格子只带 id，展示与统计都要 slug）。"""
+        return {r.id: r.slug for r in self.db.list_skills(SkillQuery(limit=10000))}
+
+    def degraded_slugs(self) -> set[str]:
+        """`staleness=degraded` 的 skill（N-01.7 双条件的折旧那一半）。
+
+        只读落库的 `skill_checks(scope=decay)`（E-02.6）—— 现算会让"僵尸名单"
+        随每次刷新变动，报告与页面口径也会分叉。
+        """
+        slug_by_id = self._slug_by_id()
+        return {
+            slug_by_id.get(row.skill_id, row.skill_id)
+            for row in self.db.list_checks("decay")
+            if row.rule == "staleness" and row.level == "warn"
+        }
 
     def decay_metrics(self, slug: str) -> dict:
         """折旧三维（E-02）：staleness / dependency_broken / upstream_divergence。
@@ -1935,7 +2356,7 @@ class StaleWriteError(Exception):
 
 
 class SkillValidationError(ValueError):
-    """CRUD 入参校验失败（P3）。code：SLUG_INVALID / SLUG_EXISTS / VALIDATION。
+    """CRUD 入参校验失败。code：SLUG_INVALID / NAME_CONFLICT / NAME_COLLISION / VALIDATION。
 
     继承 ValueError：CLI 侧按现有 except ValueError 打印，API 侧按 code 映射 4xx。
     """
@@ -1945,15 +2366,37 @@ class SkillValidationError(ValueError):
         self.code = code
 
 
-def _render_skill_md(name: str, description: str) -> bytes:
-    """新建模板（FR-2.1.7）。name/description 用 JSON 双引号转义——
+# E-07.2：内置模板三选一。差异只在「骨架文件集」，不引外部模板目录 ——
+# 模板是产品内置资产，允许用户改的是生成出来的 Skills，不是模板本身。
+CREATE_TEMPLATES: tuple[str, ...] = ("minimal", "with-deps", "with-scripts")
+
+_TEMPLATE_FILES: dict[str, dict[str, str]] = {
+    "minimal": {},
+    # 带依赖声明：frontmatter 里 `dependencies: []` 即可空列表起步
+    "with-deps": {},
+    "with-scripts": {
+        "references/example.md": "# 参考材料\n\n放长文档、背景资料、术语表。\n",
+        "scripts/example.py": (
+            "#!/usr/bin/env python3\n"
+            "\"\"\"骨架脚本：把可执行逻辑放这里，SKILL.md 里只写怎么用。\"\"\"\n"
+            "print('hello from skill')\n"
+        ),
+    },
+}
+
+
+def _render_skill_md(
+    name: str, description: str, *,
+    category: str | None = None, with_deps: bool = False,
+) -> bytes:
+    """新建模板（FR-2.1.7 / E-07.2）。name/description 用 JSON 双引号转义——
     JSON 字符串是合法 YAML 标量，中文 / 冒号 / 引号混排都安全（05 P0-3 编码）。"""
     fm_name = json.dumps(name, ensure_ascii=False)
     fm_desc = json.dumps(description, ensure_ascii=False)
-    return (
-        "---\n"
-        f"name: {fm_name}\n"
-        f"description: {fm_desc}\n"
-        "---\n"
-        f"\n# {name}\n\n在 Web 或编辑器中补充正文。\n"
-    ).encode()
+    lines = ["---", f"name: {fm_name}", f"description: {fm_desc}"]
+    if category:
+        lines.append(f"category: {json.dumps(category, ensure_ascii=False)}")
+    if with_deps:
+        lines.append("dependencies: []")
+    lines.append("---")
+    return ("\n".join(lines) + f"\n\n# {name}\n\n在 Web 或编辑器中补充正文。\n").encode()

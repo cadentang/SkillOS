@@ -20,6 +20,7 @@ from datetime import UTC, datetime, time, timedelta
 from typing import Any, Protocol
 
 from skillos.core.algorithm.usage import aggregate_buckets
+from skillos.core.constants import STALENESS_DEGRADED_DAYS
 from skillos.core.logging import get_logger
 
 log = get_logger("skillos.usage")
@@ -34,6 +35,9 @@ VIA_VALUES = frozenset({VIA_MCP, VIA_WEB, VIA_CLI, VIA_DAEMON})
 # N-11.1：事件表保留 30 天；聚合窗口与它对齐（5.2：近 30 天重算）
 EVENT_RETENTION_DAYS = 30
 AGGREGATE_WINDOW_DAYS = 30
+# N-01.9：断连补偿靠「每次把窗口内聚合全量重报 + 服务端去重合并」，
+# 所以上报窗口与聚合窗口同宽，漏报的日期下次自然补齐
+REPORT_WINDOW_DAYS = 30
 
 
 def new_session_id() -> str:
@@ -55,10 +59,15 @@ class _UsageStore(Protocol):
     def list_usage_events(self, since: datetime) -> list[Any]: ...
     def replace_usage_daily(self, since: Any, rows: list[dict]) -> int: ...
     def purge_usage_events(self, before: datetime) -> int: ...
+    def list_usage_daily(self, since: Any) -> list[Any]: ...
+    def list_skill_events(self, skill_id: str, limit: int = 100) -> list[Any]: ...
+    def list_events_by_sessions(self, session_ids: list[str],
+                                per_session: int = 50) -> list[Any]: ...
 
 
 class _Switch(Protocol):
     def collect_enabled(self) -> bool: ...
+    def report_enabled(self) -> bool: ...
 
 
 class UsageService:
@@ -129,3 +138,123 @@ class UsageService:
         """清理 30 天前事件。**只在聚合完成后调用**（5.2 表注：先重算后清理）。"""
         cutoff = (now or datetime.now(UTC)) - timedelta(days=keep_days)
         return self._store.purge_usage_events(cutoff)
+
+    # ---------------------------------------------------------------- 云端上报（N-01.4/5）
+
+    def report_rows(self, *, device_id: str = "local", days: int = REPORT_WINDOW_DAYS,
+                    now: datetime | None = None) -> list[dict]:
+        """构造上报报文：**只有聚合行**（N-01.5 明文允许的字段集）。
+
+        开关关闭时返回空列表 —— 让「零上报」成为可断言的返回值，而不是靠"没人调用"。
+        报文里绝不出现事件行、`param_digest`、Runtime 路径（N-11.6 / N-11.9⑤）。
+        `device_id` 只是占位：云端一律用认证连接的 token_id 覆盖（设备自报值不可信）。
+        """
+        if not self._settings.report_enabled():
+            return []
+        current = now or datetime.now(UTC)
+        since = (current - timedelta(days=days - 1)).date()
+        rows = self._store.list_usage_daily(since)
+        return [
+            {
+                "device_id": device_id,
+                "skill_id": row.skill_id,
+                "date": row.date.isoformat(),
+                "via": row.via,
+                "count": row.count,
+                "tokens_in": row.tokens_in,
+                "tokens_out": row.tokens_out,
+                "duration_ms_p50": row.duration_ms_p50,
+                "duration_ms_p95": row.duration_ms_p95,
+                "by_op": row.by_op,
+            }
+            for row in rows
+        ]
+
+    # -------------------------------------------------- 管理者视图（N-01.7/8 / N-11.7）
+
+    def totals_by_skill(self, *, days: int = AGGREGATE_WINDOW_DAYS,
+                        now: datetime | None = None) -> dict[str, dict]:
+        """窗口内按 skill 汇总：`{slug: {count, tokens_in, tokens_out}}`。
+
+        只含"被调用过"的 skill —— 零调用集合要拿 slug 全集去减，
+        不要在这里补 0：补 0 会让"没装这个 skill"和"装了但没用"混成一件事。
+        """
+        current = now or datetime.now(UTC)
+        since = (current - timedelta(days=days - 1)).date()
+        out: dict[str, dict] = {}
+        for row in self._store.list_usage_daily(since):
+            item = out.setdefault(row.skill_id, {
+                "skill_id": row.skill_id, "count": 0, "tokens_in": 0, "tokens_out": 0,
+            })
+            item["count"] += int(row.count or 0)
+            item["tokens_in"] += int(row.tokens_in or 0)
+            item["tokens_out"] += int(row.tokens_out or 0)
+        return out
+
+    def top_called(self, *, slugs: list[str] | None = None,
+                   days: int = REPORT_WINDOW_DAYS, limit: int = 10,
+                   now: datetime | None = None) -> list[dict]:
+        """近 N 天调用 Top（N-01.8）。`slugs` 非空时只统计这些 skill。"""
+        totals = self.totals_by_skill(days=days, now=now)
+        allowed = set(slugs) if slugs is not None else None
+        rows = [v for k, v in totals.items() if allowed is None or k in allowed]
+        rows.sort(key=lambda r: (-r["count"], r["skill_id"]))
+        return rows[: max(1, limit)]
+
+    def zero_called(self, *, slugs: list[str],
+                    days: int = REPORT_WINDOW_DAYS,
+                    now: datetime | None = None) -> list[str]:
+        """窗口内零调用（N-01.8 第二个榜单）：`slugs` 全集减去有调用记录的。"""
+        called = set(self.totals_by_skill(days=days, now=now))
+        return sorted(set(slugs) - called)
+
+    def zombie_slugs(self, *, slugs: list[str], degraded: set[str],
+                     days: int = STALENESS_DEGRADED_DAYS,
+                     now: datetime | None = None) -> list[str]:
+        """僵尸口径**唯一实现**（N-01.7，用户 2026-10-24 拍板）：
+
+        `近 days 天零调用` ∩ `staleness=degraded`，双条件缺一不可。
+        旧口径（仅 staleness）不保留 —— 管理者视图只能走这一个函数，
+        换口径 = 改这里一处，前端只负责把「实测 + 折旧」标注画出来。
+        """
+        called = set(self.totals_by_skill(days=days, now=now))
+        return sorted(set(degraded) & (set(slugs) - called))
+
+    def events_for(self, slug: str, *, limit: int = 100) -> list[dict]:
+        """单 skill 近 N 次调用（N-11.7）：只有时间 / op / 耗时 / 结果 / token。
+
+        不带 `param_digest`（参数摘要属隐私面，前端不需要它）。
+        """
+        return [
+            {
+                "at": e.at.isoformat(), "op": e.op, "via": e.via,
+                "runtime": e.runtime, "session_id": e.session_id,
+                "duration_ms": e.duration_ms, "ok": bool(e.ok),
+                "tokens_in": e.tokens_in, "tokens_out": e.tokens_out,
+            }
+            for e in self._store.list_skill_events(slug, limit=limit)
+        ]
+
+    def session_chains(self, slug: str, *, limit: int = 100,
+                       per_session: int = 50) -> list[dict]:
+        """按 session 还原调用链（N-11.7 L3）：`[A → B → error]` 的顺序视图。
+
+        事件表 30 天滚动清理，所以链只覆盖还能查到的事件 —— 不给"已清理"假数据。
+        """
+        events = self._store.list_skill_events(slug, limit=limit)
+        session_ids = list(dict.fromkeys(e.session_id for e in events))
+        if not session_ids:
+            return []
+        grouped: dict[str, list[dict]] = {sid: [] for sid in session_ids}
+        for e in self._store.list_events_by_sessions(session_ids, per_session=per_session):
+            bucket = grouped.get(e.session_id)
+            if bucket is None or len(bucket) >= per_session:
+                continue
+            bucket.append({
+                "at": e.at.isoformat(), "slug": e.skill_id, "op": e.op,
+                "ok": bool(e.ok), "duration_ms": e.duration_ms,
+            })
+        return [
+            {"session_id": sid, "steps": steps}
+            for sid, steps in grouped.items() if steps
+        ]
