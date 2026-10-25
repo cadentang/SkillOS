@@ -1,6 +1,11 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { endpoints, type ConflictDecision, type PushResultItem } from "../api/endpoints";
+import {
+  endpoints,
+  type ConflictDecision,
+  type PushResultItem,
+  type SimilarityItem,
+} from "../api/endpoints";
 import { ApiError } from "../api/client";
 import ConflictResolveDialog from "../components/ConflictResolveDialog";
 import CreateSkillDialog from "../components/CreateSkillDialog";
@@ -65,6 +70,31 @@ export default function Dashboard() {
     retry: false,
     staleTime: Infinity, // 沙盒标志部署期不变（与 Layout 共享缓存）
   });
+  /** N-01.7/8 管理者视图：Top / 零调用 / 僵尸（本地数据，daemon 离线时不可用）。 */
+  const usage = useQuery({
+    queryKey: ["usage", "manager"],
+    queryFn: () => endpoints.managerUsage(30),
+    retry: false,
+    refetchInterval: 60_000,
+  });
+  /** E-04.3「疑似重复」：只读数 + 提示，回收动作走人工路径（N-07.2 永不自动执行）。 */
+  const similarity = useQuery({
+    queryKey: ["similarity"],
+    queryFn: endpoints.similarity,
+    retry: false,
+    refetchInterval: 60_000,
+  });
+  const usageData = usage.data;
+  /** 僵尸占比只认新口径（实测 + 折旧）；离线显示 —，不回落旧口径混着看 */
+  const zombiePct =
+    usageData && usageData.total_skills > 0
+      ? Math.round((usageData.zombie.length / usageData.total_skills) * 100)
+      : null;
+
+  const similarItems = similarity.data?.items ?? [];
+  const deprecatedList = similarity.data?.deprecated ?? [];
+  const similarityOffline =
+    similarity.error instanceof ApiError && similarity.error.code === "DAEMON_OFFLINE";
 
   const allRows = drift.data?.rows ?? [];
   const filteredRows = useMemo(() => {
@@ -95,13 +125,87 @@ export default function Dashboard() {
     }) => endpoints.push(skillIds, confirmRemovals),
   });
 
-  /** 沙盒重置（P7 / FR-3.10）：仅沙盒模式渲染按钮；成功后全量失效刷新 */
+  /** 沙盒重置（P7 / E-06.4）：202 + task_id → 轮询到终态；失败要看到原因（含自证差异） */
+  const [sandboxStatus, setSandboxStatus] = useState<string | null>(null);
   const sandboxResetMutation = useMutation({
-    mutationFn: () => endpoints.sandboxReset(),
+    mutationFn: async () => {
+      const started = await endpoints.sandboxReset();
+      setSandboxStatus("重置中…");
+      const taskId = started.task_id;
+      for (let i = 0; i < 150; i += 1) {
+        await new Promise((r) => setTimeout(r, 2000));
+        const st = await endpoints.sandboxResetStatus(taskId);
+        if (st.status === "succeeded") {
+          setSandboxStatus(
+            `重置完成${st.result?.seed_version ? `（seed ${st.result.seed_version}）` : ""}`,
+          );
+          return st;
+        }
+        if (st.status === "failed") {
+          setSandboxStatus(null);
+          throw new Error(st.error ?? "重置失败");
+        }
+      }
+      setSandboxStatus(null);
+      throw new Error("重置超时（5 分钟）——请查看 daemon 日志");
+    },
     onSuccess: () => {
       void queryClient.invalidateQueries();
     },
   });
+
+  /** 详情页/总览的「立即比对」（TQ-03）：覆盖式落库 ⇒ 重复点不新增行。 */
+  const similarityRunMutation = useMutation({
+    mutationFn: () => endpoints.similarityRun(),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["similarity"] });
+    },
+  });
+
+  /** 回收落选方（N-07.3）：两段式 —— 先 dry_run 列 removals，用户确认后才真跑。 */
+  const [deprecateTarget, setDeprecateTarget] = useState<
+    { a: string; b: string; keep: string; removals: string[] } | null
+  >(null);
+  /** 仅查看差异（N-07 GWT③）：双栏只读对比，不产生任何变更 */
+  const [diffTarget, setDiffTarget] = useState<{ a: string; b: string } | null>(null);
+  const [similarityError, setSimilarityError] = useState<string | null>(null);
+
+  const deprecateMutation = useMutation({
+    mutationFn: (v: {
+      a: string; b: string; keep: string; dryRun: boolean; confirmRemovals?: string[];
+    }) => endpoints.similarityResolve(v.a, v.b, v.keep, {
+      dryRun: v.dryRun, confirmRemovals: v.confirmRemovals,
+    }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["similarity"] });
+      void queryClient.invalidateQueries({ queryKey: ["drift"] });
+    },
+  });
+
+  /** N-07.5 恢复：重新分发即恢复，不新增端点（push 成功 daemon 会清弃用标记）。 */
+  const restoreMutation = useMutation({
+    mutationFn: (skillId: string) => endpoints.push([skillId]),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["similarity"] });
+      void queryClient.invalidateQueries({ queryKey: ["drift"] });
+    },
+  });
+
+  async function previewDeprecate(item: SimilarityItem, keep: string) {
+    setSimilarityError(null);
+    const drop = keep === item.a ? item.b : item.a;
+    try {
+      const res = await endpoints.similarityResolve(item.a, item.b, keep, { dryRun: true });
+      setDeprecateTarget({ a: item.a, b: item.b, keep, removals: res.removals ?? [] });
+      if ((res.removals ?? []).length === 0) {
+        setSimilarityError(
+          `${drop} 没有可回收的 Runtime 副本（可能尚未分发过），确认后将只打弃用标记。`,
+        );
+      }
+    } catch (e) {
+      setSimilarityError(`预览失败：${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
 
   const resolveMutation = useMutation({
     mutationFn: ({
@@ -354,7 +458,15 @@ export default function Dashboard() {
             label="覆盖度（同步格 / 全部格）"
             value={`${manager?.coverage_pct ?? 0}%`}
           />
-          <StatCard label="僵尸 Skill 占比" value={`${manager?.zombie_pct ?? 0}%`} />
+          <StatCard
+            label="僵尸 Skill 占比"
+            value={zombiePct !== null ? `${zombiePct}%` : "—"}
+            delta={
+              usageData
+                ? `${usageData.zombie.length} / ${usageData.total_skills} 个`
+                : "daemon 离线，本地用量不可用"
+            }
+          />
           <StatCard
             label="门禁 error"
             value={gateTotals ? gateTotals.errors : "—"}
@@ -378,6 +490,152 @@ export default function Dashboard() {
             {gateTotals ? ` · 门禁覆盖 ${gateTotals.skills} 个 Skill` : " · daemon 离线，门禁计数不可用"}
           </p>
         )}
+
+        {/* N-01.8 两个榜单 + N-01.7 口径标注（管理者视图，数据来自 daemon） */}
+        <div className="mt-md grid gap-md lg:grid-cols-2">
+          <ListCard
+            title="近 30 天调用 Top 10"
+            hint={
+              usageData
+                ? `L1 调用 + L2 会话归属（token 为估算口径）`
+                : "daemon 离线，本地用量不可用"
+            }
+          >
+            {(usageData?.top ?? []).map((item, index) => (
+              <RankRow
+                key={item.skill_id}
+                rank={index + 1}
+                label={item.skill_id}
+                value={`${item.count} 次`}
+                hint={`in ${item.tokens_in} / out ${item.tokens_out}`}
+              />
+            ))}
+            {usageData && usageData.top.length === 0 && (
+              <EmptyRow text="近 30 天没有调用记录" />
+            )}
+          </ListCard>
+
+          <ListCard
+            title="近 30 天零调用"
+            hint={usageData ? `共 ${usageData.zero_called.length} 个 Skill` : "—"}
+          >
+            {(usageData?.zero_called ?? []).slice(0, 12).map((slug) => (
+              <RankRow key={slug} label={slug} value="0 次" />
+            ))}
+            {usageData && usageData.zero_called.length > 12 && (
+              <EmptyRow
+                text={`另有 ${usageData.zero_called.length - 12} 个未显示`}
+              />
+            )}
+            {usageData && usageData.zero_called.length === 0 && (
+              <EmptyRow text="没有零调用的 Skill" />
+            )}
+          </ListCard>
+        </div>
+        <p
+          className="mt-sm text-[var(--font-caption)]"
+          style={{ color: "var(--text-secondary)" }}
+          title="口径单点在 usage_service.zombie_slugs（N-01.7）"
+        >
+          僵尸口径：{usageData?.zombie_basis ?? "实测（90 天零调用）+ 折旧（staleness=degraded）"}
+          {usageData && usageData.zombie.length > 0
+            ? ` · 当前 ${usageData.zombie.slice(0, 5).join("、")}${usageData.zombie.length > 5 ? " 等" : ""}`
+            : ""}
+        </p>
+      </section>
+
+      {/* ─────── 疑似重复（E-04.3 / N-07）：只提示与建议，回收永远是人工动作 ─────── */}
+      <section>
+        <div className="flex items-end justify-between gap-md">
+          <div>
+            <h2 className="font-semibold" style={{ fontSize: "var(--font-h2)" }}>
+              疑似重复
+            </h2>
+            <p
+              className="mt-xs text-[var(--font-caption)]"
+              style={{ color: "var(--text-tertiary)" }}
+            >
+              ≥75% 列出提示 · ≥90% 给合并建议（保留 / 回收由推荐链给出，永不自动执行）
+            </p>
+          </div>
+          <button
+            type="button"
+            disabled={!daemon.connected || similarityRunMutation.isPending}
+            onClick={() => similarityRunMutation.mutate()}
+            className="h-9 rounded-[var(--radius-control)] border px-md text-[13px] font-medium disabled:opacity-40"
+            style={{
+              background: "var(--surface)",
+              borderColor: "var(--border)",
+              color: "var(--text-primary)",
+            }}
+            title="立即比对（TQ-03：旁路能力，不计入 check 性能基准）"
+          >
+            {similarityRunMutation.isPending ? "比对中…" : "立即比对"}
+          </button>
+        </div>
+
+        <div
+          className="mt-md flex flex-col rounded-[var(--radius-card)] border p-md"
+          style={{ background: "var(--surface)", borderColor: "var(--border)" }}
+        >
+          {similarityOffline && (
+            <EmptyRow text="daemon 离线：相似对存在本机 skill_similarity，连上后才能读取。" />
+          )}
+          {similarity.isError && !similarityOffline && (
+            <p className="text-[13px]" style={{ color: "var(--danger)" }}>
+              读取失败：{similarity.error instanceof Error ? similarity.error.message : "未知错误"}
+            </p>
+          )}
+          {!similarityOffline && !similarity.isError && similarItems.length === 0 && (
+            <EmptyRow text="没有 ≥75% 的相似对。新纳管或改动 Skill 后会重新比对。" />
+          )}
+          {similarityError && (
+            <p className="pb-sm text-[var(--font-caption)]" style={{ color: "var(--danger)" }}>
+              {similarityError}
+            </p>
+          )}
+          {similarItems.slice(0, 8).map((item) => (
+            <SimilarRow
+              key={`${item.a}:${item.b}`}
+              item={item}
+              keep={item.suggestion?.keep ?? null}
+              onDeprecate={(keep) => void previewDeprecate(item, keep)}
+              onDiff={() => setDiffTarget({ a: item.a, b: item.b })}
+            />
+          ))}
+          {similarItems.length > 8 && (
+            <EmptyRow text={`另有 ${similarItems.length - 8} 对未显示（按分数降序）`} />
+          )}
+          {deprecatedList.length > 0 && (
+            <div
+              className="flex flex-wrap items-center gap-sm border-t pt-sm"
+              style={{ borderColor: "var(--divider)" }}
+            >
+              <span className="text-[var(--font-caption)]" style={{ color: "var(--text-tertiary)" }}>
+                已弃用（canonical 保留，可恢复）
+              </span>
+              {deprecatedList.map((d) => (
+                <span
+                  key={d.slug}
+                  className="flex items-center gap-xs rounded-[var(--radius-control)] px-xs py-xs text-[var(--font-caption)]"
+                  style={{ background: "var(--surface-alt)", color: "var(--text-secondary)" }}
+                >
+                  {d.slug}
+                  <button
+                    type="button"
+                    disabled={!daemon.connected || restoreMutation.isPending}
+                    onClick={() => restoreMutation.mutate(d.id)}
+                    className="underline disabled:opacity-40"
+                    style={{ color: "var(--primary)" }}
+                    title="重新分发即恢复（N-07.5）"
+                  >
+                    恢复
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
       </section>
 
       {/* 日志面板（P5 / FR-1.1.12）：同一页面编排（08 §4 R2） */}
@@ -416,7 +674,7 @@ export default function Dashboard() {
               }}
               title="重置沙盒数据（FR-3.10）"
             >
-              {sandboxResetMutation.isPending ? "重置中…" : "重置沙盒数据"}
+              {sandboxResetMutation.isPending ? sandboxStatus ?? "重置中…" : "重置沙盒数据"}
             </button>
           )}
           <span
@@ -515,6 +773,36 @@ export default function Dashboard() {
           }
         />
       )}
+
+      {deprecateTarget && (
+        <RemovalsConfirmDialog
+          paths={deprecateTarget.removals}
+          title="回收落选方（canonical 不动）"
+          description={
+            `将回收 ${deprecateTarget.keep === deprecateTarget.a
+              ? deprecateTarget.b : deprecateTarget.a} 的 Runtime 副本，并打上弃用标记。`
+            + " canonical 正文与历史保留，随时可点「恢复」（重新分发）。删除前 daemon 会自动备份。"
+          }
+          confirmText="确认回收"
+          onCancel={() => setDeprecateTarget(null)}
+          onConfirm={() => {
+            deprecateMutation.mutate({
+              a: deprecateTarget.a, b: deprecateTarget.b,
+              keep: deprecateTarget.keep, dryRun: false,
+              confirmRemovals: deprecateTarget.removals,
+            });
+            setDeprecateTarget(null);
+          }}
+        />
+      )}
+
+      {diffTarget && (
+        <SimilarDiffDialog
+          a={diffTarget.a}
+          b={diffTarget.b}
+          onClose={() => setDiffTarget(null)}
+        />
+      )}
     </div>
   );
 }
@@ -561,6 +849,233 @@ function StatCard({
           {delta}
         </span>
       )}
+    </div>
+  );
+}
+
+function ListCard({
+  title,
+  hint,
+  children,
+}: {
+  title: string;
+  hint: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div
+      className="flex flex-col gap-sm p-md"
+      style={{
+        background: "var(--surface)",
+        border: "1px solid var(--border)",
+        borderRadius: "var(--radius-card)",
+      }}
+    >
+      <div className="flex items-baseline justify-between gap-sm">
+        <span className="font-medium text-[var(--font-body)]">{title}</span>
+        <span
+          className="text-[var(--font-caption)]"
+          style={{ color: "var(--text-secondary)" }}
+        >
+          {hint}
+        </span>
+      </div>
+      <div className="h-px w-full" style={{ background: "var(--divider)" }} />
+      <div className="flex flex-col gap-xs">{children}</div>
+    </div>
+  );
+}
+
+function RankRow({
+  rank,
+  label,
+  value,
+  hint,
+}: {
+  rank?: number;
+  label: string;
+  value: string;
+  hint?: string;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-sm py-xs">
+      <span className="flex min-w-0 items-center gap-sm">
+        {rank !== undefined && (
+          <span
+            className="shrink-0 text-[var(--font-caption)] tabular-nums"
+            style={{ color: "var(--text-secondary)", width: 18 }}
+          >
+            {rank}
+          </span>
+        )}
+        <span className="truncate text-[13px]">{label}</span>
+      </span>
+      <span className="flex shrink-0 items-center gap-sm">
+        {hint && (
+          <span
+            className="text-[var(--font-caption)] tabular-nums"
+            style={{ color: "var(--text-secondary)" }}
+          >
+            {hint}
+          </span>
+        )}
+        <span className="text-[13px] tabular-nums">{value}</span>
+      </span>
+    </div>
+  );
+}
+
+function EmptyRow({ text }: { text: string }) {
+  return (
+    <p
+      className="py-sm text-[var(--font-caption)]"
+      style={{ color: "var(--text-secondary)" }}
+    >
+      {text}
+    </p>
+  );
+}
+
+/** 一行相似对：分数 + 建议 + 三个动作（N-07）。
+ *
+ *  动作顺序刻意是「先看差异、再回收」：撤回理由 —— 用户永远可以否决建议（N-07.2）；
+ *  回收必须走两段式守卫（先列 removals 再确认，红线 16），本行只负责发起预览。
+ */
+function SimilarRow({
+  item, keep, onDeprecate, onDiff,
+}: {
+  item: SimilarityItem;
+  keep: string | null;
+  onDeprecate: (keep: string) => void;
+  onDiff: () => void;
+}) {
+  const drop = keep === item.a ? item.b : item.a;
+  return (
+    <div
+      className="flex flex-col gap-xs border-b py-sm"
+      style={{ borderColor: "var(--divider)" }}
+    >
+      <span className="flex flex-wrap items-baseline gap-sm">
+        <span className="text-[13px] font-medium">{item.a}</span>
+        <span className="text-[var(--font-caption)]" style={{ color: "var(--text-tertiary)" }}>
+          ↔
+        </span>
+        <span className="text-[13px] font-medium">{item.b}</span>
+        <span
+          className="text-[var(--font-caption)] tabular-nums"
+          style={{ color: item.merge_candidate ? "var(--warning)" : "var(--text-secondary)" }}
+        >
+          {(item.score * 100).toFixed(1)}%
+        </span>
+        <span
+          className="rounded-[var(--radius-control)] px-xs text-[var(--font-caption)]"
+          style={{
+            color: item.merge_candidate ? "var(--warning)" : "var(--text-secondary)",
+            border: `1px solid ${item.merge_candidate ? "var(--warning)" : "var(--border)"}`,
+          }}
+        >
+          {item.merge_candidate ? "建议合并" : "仅提示"}
+        </span>
+      </span>
+      {item.suggestion ? (
+        <span className="text-[var(--font-caption)]" style={{ color: "var(--text-secondary)" }}>
+          建议保留 {item.suggestion.keep} · 回收 {item.suggestion.drop}（{item.suggestion.reason}）
+        </span>
+      ) : (
+        <span className="text-[var(--font-caption)]" style={{ color: "var(--text-tertiary)" }}>
+          未到合并阈值：先看看是否真的重复（N-07.1）
+        </span>
+      )}
+      <span className="flex flex-wrap items-center gap-sm">
+        <button
+          type="button"
+          onClick={onDiff}
+          className="rounded-[var(--radius-control)] px-sm py-xs text-[var(--font-caption)]"
+          style={{ border: "1px solid var(--border)", color: "var(--text-secondary)" }}
+          title="双栏只读对比 SKILL.md，不产生任何变更（N-07 GWT③）"
+        >
+          仅查看差异
+        </button>
+        {keep && (
+          <button
+            type="button"
+            onClick={() => onDeprecate(keep)}
+            className="rounded-[var(--radius-control)] px-sm py-xs text-[var(--font-caption)]"
+            style={{ border: "1px solid var(--danger)", color: "var(--danger)" }}
+            title={`回收 ${drop} 的 Runtime 副本（canonical 保留，可恢复）`}
+          >
+            回收 {drop}
+          </button>
+        )}
+      </span>
+    </div>
+  );
+}
+
+/** 双栏只读对比（N-07 GWT③）：两个 Skill 的 SKILL.md 并排看。
+ *
+ *  刻意不用 Monaco：主线不依赖编辑器（CODEBUDDY 前端约定），一处只读对比不值得
+ *  把 Monaco chunk 拉进主路径；纯文本 + 等宽即可满足「看清差异」。
+ */
+function SimilarDiffDialog({
+  a, b, onClose,
+}: { a: string; b: string; onClose: () => void }) {
+  const left = useQuery({
+    queryKey: ["skill-file", a, "SKILL.md"],
+    queryFn: () => endpoints.fileRead(a, "SKILL.md"),
+  });
+  const right = useQuery({
+    queryKey: ["skill-file", b, "SKILL.md"],
+    queryFn: () => endpoints.fileRead(b, "SKILL.md"),
+  });
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center"
+      style={{ background: "rgba(15, 23, 41, 0.45)" }}
+      role="dialog"
+      aria-modal="true"
+      aria-label="相似对差异"
+    >
+      <div
+        className="flex max-h-[80vh] w-[860px] flex-col rounded-[var(--radius-card)] border"
+        style={{ background: "var(--surface)", borderColor: "var(--border)" }}
+      >
+        <div className="flex items-center justify-between px-lg pt-lg">
+          <h2 className="font-semibold" style={{ fontSize: "var(--font-h2)" }}>
+            差异对比（只读）
+          </h2>
+          <button
+            type="button"
+            onClick={onClose}
+            className="text-[var(--font-caption)]"
+            style={{ color: "var(--text-secondary)" }}
+          >
+            关闭
+          </button>
+        </div>
+        <div className="grid flex-1 grid-cols-2 gap-md overflow-hidden p-lg">
+          {[["左", a, left], ["右", b, right]].map(([side, slug, q]) => {
+            const query = q as typeof left;
+            return (
+              <div key={side as string} className="flex min-h-0 flex-col gap-xs">
+                <span className="text-[var(--font-caption)]" style={{ color: "var(--text-tertiary)" }}>
+                  {slug as string} · SKILL.md
+                </span>
+                <pre
+                  className="min-h-0 flex-1 overflow-auto rounded-[var(--radius-control)] p-sm text-[var(--font-mono)]"
+                  style={{ background: "var(--surface-alt)", color: "var(--text-primary)" }}
+                >
+                  {query.isLoading
+                    ? "加载中…"
+                    : query.isError
+                      ? `读取失败：${query.error instanceof Error ? query.error.message : "未知错误"}`
+                      : query.data?.content ?? "（空文件）"}
+                </pre>
+              </div>
+            );
+          })}
+        </div>
+      </div>
     </div>
   );
 }

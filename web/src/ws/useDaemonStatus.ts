@@ -7,6 +7,7 @@ import { tokenStore } from "../api/client";
  *  写按钮的 disabled 都由它派生；WS 事件到达时 invalidateQuery（04 §2.7.3）。
  *
  *  事件：daemon_status → 连接态；drift_changed → 数据变更权威信号；
+ *  usage_changed → 用量汇总重取（N-01.4）；
  *  task_done → 仅写集失效 ['drift'] / ['gate']（04 §4.2）。连接本身断开
  *  （云端不可达）也视为 daemon 状态未知 → 置 offline。 */
 export interface DaemonStatus {
@@ -82,6 +83,15 @@ export function useDaemonStatus(): DaemonStatus {
             // 数据变更权威信号：无条件失效（04 §2.7.3）
             void queryClient.invalidateQueries({ queryKey: ["drift"] });
             void queryClient.invalidateQueries({ queryKey: ["gate"] });
+          } else if (msg.type === "usage_changed") {
+            // daemon 主动上报落库（N-01.4）：云端已合并 → 汇总视图要重取
+            void queryClient.invalidateQueries({ queryKey: ["usage", "summary"] });
+          } else if (msg.type === "cr.updated") {
+            // E-05.4：CR 状态变更（含别人审的）→ 列表/详情/团队卡一起失效。
+            // 不用 task_done 那套写集判断：CR 变更不走 daemon 任务，来自云端路由。
+            void queryClient.invalidateQueries({ queryKey: ["team-crs"] });
+            void queryClient.invalidateQueries({ queryKey: ["cr-detail"] });
+            void queryClient.invalidateQueries({ queryKey: ["team"] });
           } else if (msg.type === "task_done" && msg.op && WRITE_OPS.has(msg.op)) {
             // 只有写任务完成才失效 —— 读任务（status/gate_summary/logs…）
             // 的重取自身也产生 task_done，无差别失效会自激成请求风暴

@@ -54,6 +54,26 @@ const NAV_ITEMS: NavItem[] = [
     ),
   },
   {
+    to: "/reports",
+    label: "体检报告",
+    icon: (
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
+        <path d="M3.5 2.5h9v11h-9z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
+        <path d="M5.5 5.5h5M5.5 8h5M5.5 10.5h3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+      </svg>
+    ),
+  },
+  {
+    to: "/rules",
+    label: "规则面板",
+    icon: (
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
+        <path d="M3.5 3.5h9M3.5 8h9M3.5 12.5h5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+        <circle cx="11.5" cy="12.5" r="1.6" stroke="currentColor" strokeWidth="1.5" />
+      </svg>
+    ),
+  },
+  {
     to: "/runtimes",
     label: "Runtime 设置",
     icon: (

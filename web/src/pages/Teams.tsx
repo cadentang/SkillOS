@@ -248,7 +248,6 @@ export default function Teams() {
                   teamId={selected}
                   crs={(crs.data?.items ?? detail.data.crs) ?? []}
                   isWriter={isWriter}
-                  isAdmin={isAdmin}
                   onChanged={() => {
                     void queryClient.invalidateQueries({ queryKey: ["team", selected] });
                     void queryClient.invalidateQueries({ queryKey: ["team-crs", selected] });
@@ -433,13 +432,21 @@ function MembersPanel({
 
 // ============================================================ CR 视图
 
+/** 五态中文名（E-05.1）：终态三名要一眼可分——「已驳回」≠「已关闭」。 */
+const CR_STATUS_LABEL: Record<import("../api/endpoints").CRStatus, string> = {
+  open: "待审查",
+  approved: "已通过·待合并",
+  rejected: "已驳回",
+  merged: "已合并",
+  closed: "已关闭",
+};
+
 function CRsPanel({
-  teamId, crs, isWriter, isAdmin, onChanged,
+  teamId, crs, isWriter, onChanged,
 }: {
   teamId: string;
   crs: import("../api/endpoints").TeamCR[];
   isWriter: boolean;
-  isAdmin: boolean;
   onChanged: () => void;
 }) {
   const [title, setTitle] = useState("");
@@ -459,13 +466,18 @@ function CRsPanel({
       setErr(`提交失败：${errMsg(e)}`);
     }
   }
-  async function review(crId: string, action: "merged" | "closed") {
+  async function review(
+    crId: string,
+    action: "approve" | "reject" | "close" | "merge",
+    reason?: string,
+  ) {
     setErr(null);
     try {
-      await endpoints.reviewCR(teamId, crId, action);
+      if (action === "merge") await endpoints.mergeCR(teamId, crId);
+      else await endpoints.reviewCR(teamId, crId, action, reason);
       onChanged();
     } catch (e) {
-      setErr(`审查失败：${errMsg(e)}`);
+      setErr(action === "merge" ? `合并被拒：${errMsg(e)}` : `操作失败：${errMsg(e)}`);
     }
   }
 
@@ -487,11 +499,10 @@ function CRsPanel({
           <CRRow
             key={c.id}
             cr={c}
-            isAdmin={isAdmin}
             isWriter={isWriter}
             open={openCrId === c.id}
             onToggle={() => setOpenCrId(openCrId === c.id ? null : c.id)}
-            onReview={(action) => void review(c.id, action)}
+            onReview={(action, reason) => void review(c.id, action, reason)}
           />
         ))}
         {crs.length === 0 && (
@@ -556,14 +567,13 @@ function CRsPanel({
 }
 
 function CRRow({
-  cr, isAdmin, isWriter, open, onToggle, onReview,
+  cr, isWriter, open, onToggle, onReview,
 }: {
   cr: import("../api/endpoints").TeamCR;
-  isAdmin: boolean;
   isWriter: boolean;
   open: boolean;
   onToggle: () => void;
-  onReview: (action: "merged" | "closed") => void;
+  onReview: (action: "approve" | "reject" | "close" | "merge", reason?: string) => void;
 }) {
   const queryClient = useQueryClient();
   const crs = useQuery({
@@ -576,13 +586,19 @@ function CRRow({
     enabled: open,
   });
   const [comment, setComment] = useState("");
+  /** 审查理由：驳回必填（E-05.1），通过时可留作说明 */
+  const [reason, setReason] = useState("");
 
+  // 五态配色：approved 是"待合并"（主色），rejected / closed 同为终态灰（E-05.1）
   const status_color =
     cr.status === "merged"
       ? "var(--success)"
-      : cr.status === "closed"
-        ? "var(--text-secondary)"
-        : "var(--warning)";
+      : cr.status === "approved"
+        ? "var(--primary)"
+        : cr.status === "rejected" || cr.status === "closed"
+          ? "var(--text-secondary)"
+          : "var(--warning)";
+  const events = cr.next_events ?? [];
 
   async function postComment() {
     if (!comment.trim()) return;
@@ -601,10 +617,11 @@ function CRRow({
           <p className="font-medium">
             {cr.title}
             <span
-              className="ml-sm rounded-[var(--radius-tag)] px-xs py-xs font-mono text-[var(--font-caption)]"
+              className="ml-sm rounded-[var(--radius-tag)] px-xs py-xs text-[var(--font-caption)]"
               style={{ background: "var(--surface-alt)", color: status_color }}
+              title={`status=${cr.status}（E-05.1 五态）`}
             >
-              {cr.status}
+              {CR_STATUS_LABEL[cr.status]}
             </span>
           </p>
           <p
@@ -652,7 +669,8 @@ function CRRow({
               </li>
             ))}
           </ul>
-          {isWriter && cr.status === "open" && (
+          {/* 评论只增不删（FR-3.16）：除 closed 外的状态都能继续讨论，rejected 例外允许（E-05） */}
+          {isWriter && cr.status !== "closed" && (
             <div className="flex gap-sm">
               <input
                 value={comment}
@@ -671,24 +689,57 @@ function CRRow({
               </button>
             </div>
           )}
-          {isAdmin && cr.status === "open" && (
-            <div className="flex gap-sm">
-              <button
-                type="button"
-                onClick={() => onReview("merged")}
-                className="rounded-[var(--radius-control)] px-md py-sm text-[13px] font-medium text-[var(--inverse)]"
-                style={{ background: "var(--success)" }}
-              >
-                合入（merged）
-              </button>
-              <button
-                type="button"
-                onClick={() => onReview("closed")}
-                className="rounded-[var(--radius-control)] px-md py-sm text-[13px] font-medium text-[var(--inverse)]"
-                style={{ background: "var(--danger)" }}
-              >
-                驳回（closed）
-              </button>
+          {isWriter && events.length > 0 && (
+            <div className="flex flex-wrap items-center gap-sm">
+              <input
+                value={reason}
+                onChange={(e) => setReason(e.target.value)}
+                placeholder="审查理由（驳回必填）"
+                className="min-w-[220px] flex-1 rounded-[var(--radius-control)] border px-sm py-xs"
+                style={{ borderColor: "var(--border)", background: "var(--surface-alt)" }}
+              />
+              {events.includes("approve") && (
+                <button
+                  type="button"
+                  onClick={() => onReview("approve", reason || undefined)}
+                  className="rounded-[var(--radius-control)] px-md py-sm text-[13px] font-medium text-[var(--inverse)]"
+                  style={{ background: "var(--success)" }}
+                >
+                  审查通过
+                </button>
+              )}
+              {events.includes("merge") && (
+                <button
+                  type="button"
+                  onClick={() => onReview("merge")}
+                  className="rounded-[var(--radius-control)] px-md py-sm text-[13px] font-medium text-[var(--inverse)]"
+                  style={{ background: "var(--primary)" }}
+                  title="合并前会跑门禁并比对 canonical HEAD（E-05.2/3）"
+                >
+                  合并（过门禁）
+                </button>
+              )}
+              {events.includes("reject") && (
+                <button
+                  type="button"
+                  disabled={!reason.trim()}
+                  onClick={() => onReview("reject", reason.trim())}
+                  className="rounded-[var(--radius-control)] px-md py-sm text-[13px] font-medium disabled:opacity-40"
+                  style={{ border: "1px solid var(--danger)", color: "var(--danger)" }}
+                >
+                  驳回（需理由）
+                </button>
+              )}
+              {events.includes("close") && (
+                <button
+                  type="button"
+                  onClick={() => onReview("close", reason || undefined)}
+                  className="rounded-[var(--radius-control)] px-md py-sm text-[13px] font-medium"
+                  style={{ border: "1px solid var(--border)", color: "var(--text-secondary)" }}
+                >
+                  关闭
+                </button>
+              )}
             </div>
           )}
         </div>

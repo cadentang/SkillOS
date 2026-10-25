@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { endpoints, type GateFinding, type HealthSummary, type LogItem } from "../api/endpoints";
 import { ApiError } from "../api/client";
 import { LazyEditor } from "../components/MonacoLazy";
@@ -23,7 +23,7 @@ import { useDaemonStatusCtx } from "../ws/DaemonStatusContext";
  *  删除走 dry_run 预览 → RemovalsConfirmDialog 逐条确认（FR-1.0.26 / FR-2.4.7）。
  */
 
-type Tab = "files" | "diff" | "versions" | "checks";
+type Tab = "files" | "diff" | "versions" | "checks" | "usage";
 
 export default function SkillDetail() {
   const { slug } = useParams<{ slug: string }>();
@@ -60,6 +60,13 @@ export default function SkillDetail() {
     queryFn: () => endpoints.skillChecks(slug!),
     enabled: !!slug,
     retry: false,
+  });
+  /** E-08.1 手动上游检查：结果落在 daemon 的 upstream_sources，重取 checks 即可见 */
+  const upstreamMutation = useMutation({
+    mutationFn: () => endpoints.upstreamCheck(slug!),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["checks", slug] });
+    },
   });
   const log = useQuery({
     queryKey: ["log", slug],
@@ -171,6 +178,7 @@ export default function SkillDetail() {
     { key: "diff", label: "Diff" },
     { key: "versions", label: "Versions" },
     { key: "checks", label: `Checks${findings.length ? ` (${findings.length})` : ""}` },
+    { key: "usage", label: "调用记录" },
   ];
 
   return (
@@ -495,7 +503,19 @@ export default function SkillDetail() {
               className="mt-md border-t pt-md"
               style={{ borderColor: "var(--divider)" }}
             >
-              <p className="font-medium">折旧度量（FR-1.0.23）</p>
+              <div className="flex items-center justify-between">
+                <p className="font-medium">折旧度量（FR-1.0.23）</p>
+                <button
+                  type="button"
+                  disabled={upstreamMutation.isPending}
+                  onClick={() => upstreamMutation.mutate()}
+                  className="rounded-[var(--radius-control)] px-sm py-xs text-[var(--font-caption)] disabled:opacity-40"
+                  style={{ border: "1px solid var(--border)", color: "var(--text-secondary)" }}
+                  title="立即检查上游（E-08.1：daemon 侧跑 ls-remote，不猜结果）"
+                >
+                  {upstreamMutation.isPending ? "检查中…" : "立即检查上游"}
+                </button>
+              </div>
               <p
                 className="mt-xs text-[var(--font-caption)]"
                 style={{ color: "var(--text-secondary)" }}
@@ -509,7 +529,34 @@ export default function SkillDetail() {
                     </span>
                   </>
                 )}
+                {" · "}
+                {/* E-08.3：unknown 显示「未知」而不是「健康」——不知道就说不知道 */}
+                <span
+                  style={{
+                    color:
+                      decay.upstream_divergence === "degraded"
+                        ? "var(--warning)"
+                        : decay.upstream_divergence === "ok"
+                          ? "var(--success)"
+                          : "var(--text-tertiary)",
+                  }}
+                >
+                  上游：
+                  {decay.upstream_divergence === "ok"
+                    ? "最新"
+                    : decay.upstream_divergence === "degraded"
+                      ? "有更新"
+                      : "未知"}
+                </span>
               </p>
+              {upstreamMutation.isError && (
+                <p className="mt-xs text-[var(--font-caption)]" style={{ color: "var(--danger)" }}>
+                  检查失败：
+                  {upstreamMutation.error instanceof Error
+                    ? upstreamMutation.error.message
+                    : "未知错误"}
+                </p>
+              )}
             </div>
           )}
         </div>
@@ -542,6 +589,9 @@ export default function SkillDetail() {
           }}
         />
       )}
+
+      {/* ───────── 调用记录（N-11.7）：近 100 次 + session 调用链 ───────── */}
+      {tab === "usage" && <UsageView slug={slug ?? ""} />}
 
       {/* 删除确认（FR-1.0.26 ② / FR-2.4.7 限高滚动结构） */}
       {delRemovals && delRemovals.length > 0 && (
@@ -1023,6 +1073,123 @@ function VersionsView({
           confirmText={rbTarget.removals.length > 0 ? "确认回滚（删除上述文件）" : "确认回滚"}
         />
       )}
+    </div>
+  );
+}
+
+/** 调用记录（N-11.7）：近 100 次调用 + 按 session 的调用链。
+ *
+ *  两条必须写明的口径：
+ *  - token 是**估算**（N-11.3：按"调用事件之后的 usage"归属），不得用于计费；
+ *  - 事件表 30 天滚动清理，更早的没有记录属正常，不是"没调用过"。
+ */
+function UsageView({ slug }: { slug: string }) {
+  const usage = useQuery({
+    queryKey: ["skill-usage", slug],
+    queryFn: () => endpoints.skillUsage(slug, 100),
+    enabled: !!slug,
+    retry: false,
+  });
+
+  if (usage.isLoading) {
+    return <p className="text-[13px]" style={{ color: "var(--text-secondary)" }}>加载中…</p>;
+  }
+  if (usage.isError) {
+    const err = usage.error;
+    const code = err instanceof ApiError ? err.code : "INTERNAL";
+    return (
+      <p className="text-[13px]" style={{ color: "var(--danger)" }}>
+        {code === "DAEMON_OFFLINE"
+          ? "daemon 离线：调用记录存在本机，连上后才能查看"
+          : `读取失败：${err instanceof ApiError ? err.message : String(err)}`}
+      </p>
+    );
+  }
+
+  const data = usage.data;
+  const events = data?.events ?? [];
+  const sessions = data?.sessions ?? [];
+
+  return (
+    <div className="flex flex-col gap-md">
+      <div
+        className="rounded-[var(--radius-card)] border p-md"
+        style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+      >
+        <div className="flex items-baseline justify-between gap-sm">
+          <span className="font-medium">近 100 次调用</span>
+          <span className="text-[var(--font-caption)]" style={{ color: "var(--text-secondary)" }}>
+            token 为估算口径（N-11.3）· 事件保留 30 天
+          </span>
+        </div>
+        <div className="mt-sm h-px w-full" style={{ background: "var(--divider)" }} />
+        {events.length === 0 ? (
+          <p className="py-md text-[13px]" style={{ color: "var(--text-secondary)" }}>
+            近 30 天没有调用记录（L1 的 MCP/Web/CLI 调用与 L2 会话归属都会记在这里）
+          </p>
+        ) : (
+          <div className="mt-sm flex flex-col">
+            <div
+              className="grid grid-cols-[1.4fr_1fr_0.7fr_0.8fr_0.9fr_1fr] gap-sm py-xs text-[var(--font-caption)]"
+              style={{ color: "var(--text-tertiary)" }}
+            >
+              <span>时间</span>
+              <span>OP</span>
+              <span>通道</span>
+              <span>耗时</span>
+              <span>结果</span>
+              <span>token（估算）</span>
+            </div>
+            {events.map((e, i) => (
+              <div
+                key={`${e.at}-${i}`}
+                className="grid grid-cols-[1.4fr_1fr_0.7fr_0.8fr_0.9fr_1fr] gap-sm border-t py-xs text-[12px] tabular-nums"
+                style={{ borderColor: "var(--divider)" }}
+              >
+                <span>{new Date(e.at).toLocaleString()}</span>
+                <span className="truncate" title={e.op}>{e.op}</span>
+                <span>{e.via}</span>
+                <span>{e.duration_ms === null ? "—" : `${e.duration_ms} ms`}</span>
+                <span style={{ color: e.ok ? "var(--text-secondary)" : "var(--danger)" }}>
+                  {e.ok ? "成功" : "失败"}
+                </span>
+                <span>in {e.tokens_in} / out {e.tokens_out}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div
+        className="rounded-[var(--radius-card)] border p-md"
+        style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+      >
+        <div className="flex items-baseline justify-between gap-sm">
+          <span className="font-medium">会话调用链</span>
+          <span className="text-[var(--font-caption)]" style={{ color: "var(--text-secondary)" }}>
+            同 session 内按时间还原顺序（A → B → error）
+          </span>
+        </div>
+        <div className="mt-sm h-px w-full" style={{ background: "var(--divider)" }} />
+        {sessions.length === 0 ? (
+          <p className="py-md text-[13px]" style={{ color: "var(--text-secondary)" }}>
+            暂无可还原的会话（L2 导入的会话才有完整链路）
+          </p>
+        ) : (
+          sessions.slice(0, 20).map((s) => (
+            <div key={s.session_id} className="mt-sm">
+              <p className="text-[var(--font-caption)]" style={{ color: "var(--text-tertiary)" }}>
+                session {s.session_id}
+              </p>
+              <p className="mt-xs text-[12px]">
+                {s.steps
+                  .map((step) => `${step.slug}${step.ok ? "" : "（失败）"}`)
+                  .join(" → ")}
+              </p>
+            </div>
+          ))
+        )}
+      </div>
     </div>
   );
 }

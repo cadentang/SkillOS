@@ -1,6 +1,6 @@
 /** Runtime 设置页（FR-2.4.10 / T26 / FR-1.0.32~34 / T24~25）。
  *
- *  4 区块：Runtime（未纳管 + 已纳管 + custom 诊断）/ 守护 / 协议 / Token 配对。
+ *  5 区块：Runtime（未纳管 + 已纳管 + custom 诊断）/ 守护 / 用量 / 协议 / Token 配对。
  *  端点全部走 endpoints.*；写操作（加入 / 编辑 / 删除 custom）走 mutation。
  *  失败破坏性操作走原生 confirm / prompt 二确认（FR-1.0.26 守卫）。
  *
@@ -16,7 +16,9 @@ import {
   type DiscoveredResponse,
   type DiscoveredRuntime,
   type ProtocolStatus,
+  type UsageSummaryResponse,
 } from "../api/endpoints";
+import { ApiError } from "../api/client";
 import { useDaemonStatusCtx } from "../ws/DaemonStatusContext";
 
 export default function RuntimeSettings() {
@@ -35,7 +37,9 @@ export default function RuntimeSettings() {
       </div>
       <div className="flex flex-col gap-md">
         <RuntimeBlock />
+        <TelemetryBlock />
         <DaemonBlock />
+        <UsageBlock />
         <ProtocolBlock />
         <TokenBlock />
       </div>
@@ -504,6 +508,211 @@ function DaemonBlock() {
           )}
         </div>
       ) : null}
+    </Section>
+  );
+}
+
+// ============================================================== 采集与上报区块
+
+/** 设备侧开关（V2-T1 / N-11.8/9）：存在 daemon 本地，云端只代理。
+ *
+ *  默认值是产品决策：采集 **开**、上报 **关**、报告 **weekly**。改开关即写明「显式值」，
+ *  前端不替用户推断（T13 精神）—— 任何一次提交都只带用户真点过的那几项。
+ */
+function TelemetryBlock() {
+  const queryClient = useQueryClient();
+  const settings = useQuery({
+    queryKey: ["settings"],
+    queryFn: endpoints.settings,
+    retry: false,
+  });
+  /** 路径用草稿态：文本框每敲一个字就 PUT 一次会把 daemon 写爆 */
+  const [pathsDraft, setPathsDraft] = useState<string | null>(null);
+
+  const save = useMutation({
+    mutationFn: (items: Record<string, unknown>) => endpoints.saveSettings(items),
+    onSuccess: () => {
+      setPathsDraft(null);
+      void queryClient.invalidateQueries({ queryKey: ["settings"] });
+      void queryClient.invalidateQueries({ queryKey: ["usage", "manager"] });
+    },
+  });
+
+  const items = settings.data?.items ?? {};
+  const collect = items.usage_collect_enabled !== false;
+  const report = items.usage_report_enabled === true;
+  const cadence = typeof items["report.cadence"] === "string"
+    ? (items["report.cadence"] as string)
+    : "weekly";
+  const runtimePaths =
+    (items["telemetry.runtime_paths"] as Record<string, string[]> | undefined) ?? {};
+  const claudePaths = (runtimePaths["claude-code"] ?? []).join(", ");
+
+  const savePaths = () => {
+    const parts = (pathsDraft ?? claudePaths)
+      .split(/[,\n;]/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const next: Record<string, string[]> = { ...runtimePaths };
+    if (parts.length > 0) next["claude-code"] = parts;
+    else delete next["claude-code"];
+    save.mutate({ "telemetry.runtime_paths": next });
+  };
+
+  return (
+    <Section
+      title="采集与上报"
+      subtitle="开关随设备，不随账号 · 默认采集开、上报关（N-11.8 / N-01.5）"
+      actions={
+        <Btn label="重新读取" onClick={() => void settings.refetch()}
+             disabled={settings.isFetching} />
+      }
+    >
+      {settings.isError ? (
+        <ErrorBanner error={settings.error} />
+      ) : (
+        <>
+          <Row
+            name="本地采集（usage_collect_enabled）"
+            hint={collect ? "开：每次调用都记一条（只在本机）" : "关：不采集"}
+            hintColor={collect ? "ok" : "warn"}
+            actions={
+              <Btn
+                label={collect ? "关闭" : "开启"}
+                onClick={() => save.mutate({ usage_collect_enabled: !collect })}
+                disabled={save.isPending}
+              />
+            }
+          />
+          <Row
+            name="用量上报（usage_report_enabled）"
+            hint={
+              report
+                ? "开：每日上报聚合行（仅计数与 token，无参数、无路径）"
+                : "关：零上报（默认，可审计）"
+            }
+            hintColor={report ? "ok" : "warn"}
+            actions={
+              <Btn
+                label={report ? "关闭上报" : "开启上报"}
+                onClick={() => save.mutate({ usage_report_enabled: !report })}
+                disabled={save.isPending}
+              />
+            }
+          />
+          <Row
+            name="体检报告周期（report.cadence）"
+            hint={cadence === "daily" ? "每天生成一份" : "每周生成一份"}
+            actions={
+              <Btn
+                label={cadence === "daily" ? "改为每周" : "改为每天"}
+                onClick={() =>
+                  save.mutate({ "report.cadence": cadence === "daily" ? "weekly" : "daily" })
+                }
+                disabled={save.isPending}
+              />
+            }
+          />
+          <div className="mt-sm flex flex-col gap-xs">
+            <span className="text-[var(--font-caption)]" style={{ color: "var(--text-secondary)" }}>
+              Runtime 会话路径（telemetry.runtime_paths · claude-code）
+            </span>
+            <input
+              value={pathsDraft ?? claudePaths}
+              onChange={(e) => setPathsDraft(e.target.value)}
+              placeholder="留空 = 自动探测 ~/.claude/projects；多个目录用逗号分隔"
+              className="w-full rounded-[var(--radius-control)] px-sm py-xs text-[12px]"
+              style={{
+                background: "var(--surface-alt)",
+                border: "1px solid var(--border)",
+                color: "var(--text-primary)",
+              }}
+            />
+            <div className="flex items-center gap-sm">
+              <Btn label="保存路径" onClick={savePaths} disabled={save.isPending} />
+              <Btn label="清除（回到自动探测）" onClick={() => save.mutate({ "telemetry.runtime_paths": {} })}
+                   disabled={save.isPending} />
+            </div>
+            <span className="text-[var(--font-caption)]" style={{ color: "var(--text-tertiary)" }}>
+              手动路径存在时跳过自动探测（N-11.9③），多路径逐目录扫描、互不覆盖。
+            </span>
+          </div>
+          {save.isError && <ErrorBanner error={save.error} />}
+          {save.isSuccess && !save.isPending && (
+            <KV k="保存" v="已生效（daemon 写入即时生效，不等缓存 TTL）" color="ok" />
+          )}
+        </>
+      )}
+    </Section>
+  );
+}
+
+// ============================================================== 用量（团队视图）区块
+
+function UsageBlock() {
+  const queryClient = useQueryClient();
+  const [pulled, setPulled] = useState<number | null>(null);
+
+  const summary = useQuery<UsageSummaryResponse>({
+    queryKey: ["usage", "summary"],
+    queryFn: () => endpoints.usageSummary(30),
+    retry: false,
+  });
+
+  const syncMut = useMutation({
+    mutationFn: endpoints.usageSync,
+    onSuccess: (data) => {
+      setPulled(data.merged);
+      void queryClient.invalidateQueries({ queryKey: ["usage", "summary"] });
+    },
+  });
+
+  const data = summary.data;
+  return (
+    <Section
+      title="用量汇总"
+      subtitle={
+        data
+          ? `近 ${data.days} 天 · ${data.items.length} 个 skill（跨设备，仅总量）`
+          : "加载中…"
+      }
+      actions={
+        <Btn
+          label={syncMut.isPending ? "拉取中…" : "从设备拉取"}
+          onClick={() => syncMut.mutate()}
+          disabled={syncMut.isPending}
+        />
+      }
+    >
+      {syncMut.isError && (
+        <p
+          className="rounded-[var(--radius-control)] px-sm py-sm text-[var(--font-caption)]"
+          style={{ color: "var(--danger)", background: "var(--danger-soft, transparent)" }}
+        >
+          {syncMut.error instanceof ApiError
+            ? `${syncMut.error.code}：${syncMut.error.message}`
+            : String(syncMut.error)}
+        </p>
+      )}
+      {pulled !== null && !syncMut.isPending && (
+        <KV k="本次合并" v={`${pulled} 行`} color="ok" />
+      )}
+      {summary.isError ? (
+        <ErrorBanner error={summary.error} />
+      ) : data && data.items.length > 0 ? (
+        data.items.map((item) => (
+          <Row
+            key={item.skill_id}
+            name={item.skill_id}
+            hint={`${item.count} 次 · in ${item.tokens_in} / out ${item.tokens_out} · ${item.device_count} 台设备`}
+          />
+        ))
+      ) : (
+        <Empty>
+          暂无上报数据 —— 设备侧开关 <code>usage_report_enabled</code> 默认关闭（N-01.5），
+          开启后点「从设备拉取」
+        </Empty>
+      )}
     </Section>
   );
 }
