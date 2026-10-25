@@ -38,6 +38,9 @@ class RuleFinding:
     rule: str
     level: CheckLevel
     message: str
+    # 命中路径（自定义规则才有）：`ignore.yaml` 按 `rule_id + path` 过滤，缺了它就只能
+    # 整条规则禁用 —— 那会把「某文档里的示例」和「真的泄露」一起放行（N-08.2）
+    path: str | None = None
 
 
 @dataclass(frozen=True)

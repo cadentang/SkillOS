@@ -109,6 +109,34 @@ class GitRepo:
             lines.append(".skillos/backups/")
             gitignore.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
+    def remote_head(self, url: str, ref: str | None = None, *,
+                    timeout: int = 20) -> str | None:
+        """`git ls-remote` 取上游 ref 的 commit（E-08 上游检查的唯一 IO 出口）。
+
+        **具名领域操作**，不是通用透传：参数只有 url + ref，命令固定。
+        `ref=None` 时取 HEAD。网络失败会抛 `GitError`，由调用方计失败次数
+        （E-08.4：满 3 次才置 error），本方法不吞异常。
+        """
+        if not url or not url.strip():
+            raise GitError("上游 url 为空")
+        target = (ref or "HEAD").strip()
+        # ls-remote 不需要工作树，cwd 仍固定在 repo（避免在用户某个随机目录跑 git）
+        proc = subprocess.run(  # noqa: S603 —— 参数由本方法固定
+            ["git", *GIT_BASE_ARGS, "ls-remote", url.strip(), target],
+            cwd=self.repo_root, capture_output=True, check=False,
+            stdin=subprocess.DEVNULL, timeout=timeout,
+        )
+        if proc.returncode != 0:
+            raise GitError(
+                f"git ls-remote 失败: {proc.stderr.decode(errors='replace').strip()[:200]}"
+            )
+        for line in proc.stdout.decode(errors="replace").splitlines():
+            parts = line.split()
+            if len(parts) == 2 and parts[1].endswith(target if target.startswith("refs/") else ""):
+                return parts[0]
+        # 空输出 = ref 不存在（不是网络问题）：交给调用方判 outdated / unknown
+        return None
+
     def commit(self, paths: list[str], message: str, author: str = DEFAULT_AUTHOR) -> str:
         """提交指定路径，返回 commit sha。"""
         name, email = _parse_author(author)
@@ -254,6 +282,19 @@ class GitRepo:
     def resolve_ref(self, ref: str) -> str:
         """解析 ref（分支/tag）为 commit sha。"""
         return self._git("rev-parse", f"{ref}^{{commit}}").stdout.decode().strip()
+
+    def has_commits(self) -> bool:
+        """HEAD 是否存在（空仓库/刚 init 时为 False）。
+
+        单独一个具名探测，而不是让调用方去 catch `GitError` 再猜错误文本 ——
+        「仓库还没有提交」是正常状态，不是异常（体检测量时尤其如此）。
+        """
+        proc = subprocess.run(  # noqa: S603 —— 参数固定，无用户输入
+            ["git", *GIT_BASE_ARGS, "rev-parse", "--verify", "--quiet", "HEAD"],
+            cwd=self.repo_root, capture_output=True, check=False,
+            stdin=subprocess.DEVNULL, timeout=30,
+        )
+        return proc.returncode == 0
 
     def create_tag(self, name: str, message: str, commit: str = "HEAD") -> None:
         """建附注 tag（P4）。tag 名合法性交给 git 判定，失败抛 GitError。"""

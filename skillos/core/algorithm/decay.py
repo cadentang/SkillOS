@@ -54,15 +54,19 @@ DeclaredDeps = list[str] | FormatUnknown
 # gate 层信号名（E-02.4）：由 check 服务转成一条 info finding
 GATE_SIGNAL_DEPS_FORMAT = "fm.dependencies.format"
 
-# E-08.3 映射表：E-08 启用前 upstream_status 恒 None（unknown），此表先备着
+# E-08.3 映射表：upstream_sources.status（current/outdated/error/unknown）为权威取值；
+# 前半批旧别名保留，避免历史上打过交道的调用点静默变成 unknown。
 _UPSTREAM_STATUS_MAP: dict[str, DecayStatus] = {
+    "current": DecayStatus.OK,      # 上游无更新；本地 fork 也是事实，不算退化
+    "outdated": DecayStatus.DEGRADED,  # 上游已前进 → 需要跟进
+    "error": DecayStatus.UNKNOWN,   # 连续失败：不知道上游啥情况，不猜
+    "unknown": DecayStatus.UNKNOWN,
     "ok": DecayStatus.OK,
     "synced": DecayStatus.OK,
     "up_to_date": DecayStatus.OK,
     "diverged": DecayStatus.DEGRADED,
     "divergence": DecayStatus.DEGRADED,
     "behind": DecayStatus.DEGRADED,
-    "unknown": DecayStatus.UNKNOWN,
 }
 
 

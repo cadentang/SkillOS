@@ -1,0 +1,113 @@
+# 随包安全规则集（N-08 / docs/11 §8.4，`docs/12` §6.2）
+#
+# ruleset-version: 1
+#
+# 使用方式：首次启动拷贝到仓库 `.skillos/rules/security.yaml`，之后**归用户所有**
+# （随 git 版本化、可改级别、可删，N-08.1）。升级包时**不覆盖**用户文件；
+# 需要新增规则时以新文件 `security-2.yaml` 追加，不改本文件结构。
+#
+# 误报消化路径（N-08.4）：调 level，或在 `.skillos/rules/ignore.yaml` 里
+# 按 `rule_id + path 模式 + 理由` 白名单化（条目本身会落库可审计）。
+#
+# 类别统一 `category: security` —— `skillos check --security-only` 的过滤口径（N-08.5）。
+rules:
+  # ---- 云厂商密钥（error，命中即拦 push）----
+  - rule_id: security.aws-access-key
+    level: error
+    target: file_content
+    match:
+      pattern: '(?<![A-Z0-9])(?:AKIA|ASIA)[0-9A-Z]{16}(?![A-Z0-9])'
+    message: 疑似 AWS Access Key（AKIA/ASIA 前缀）
+    category: security
+
+  - rule_id: security.aliyun-access-key
+    level: error
+    target: file_content
+    match:
+      pattern: '(?<![A-Za-z0-9])LTAI[0-9A-Za-z]{12,20}(?![A-Za-z0-9])'
+    message: 疑似阿里云 AccessKey（LTAI 前缀）
+    category: security
+
+  - rule_id: security.gcp-api-key
+    level: error
+    target: file_content
+    match:
+      pattern: '(?<![A-Za-z0-9])AIza[0-9A-Za-z_-]{35}(?![A-Za-z0-9])'
+    message: 疑似 GCP API Key（AIza 前缀）
+    category: security
+
+  # ---- 通用凭证（error）----
+  - rule_id: security.github-token
+    level: error
+    target: file_content
+    match:
+      pattern: '(?<![A-Za-z0-9])gh[pousr]_[0-9A-Za-z]{36,}(?![A-Za-z0-9])'
+    message: 疑似 GitHub Token（ghp_/gho_/ghu_/ghs_/ghr_）
+    category: security
+
+  - rule_id: security.openai-key
+    level: error
+    target: file_content
+    match:
+      pattern: '(?<![A-Za-z0-9])sk-[A-Za-z0-9]{32,}(?![A-Za-z0-9])'
+    message: 疑似 OpenAI API Key（sk- 前缀）
+    category: security
+
+  - rule_id: security.slack-token
+    level: error
+    target: file_content
+    match:
+      pattern: '(?<![A-Za-z0-9])xox[baprs]-[0-9A-Za-z-]{10,}'
+    message: 疑似 Slack Token（xoxb-/xoxp- 前缀）
+    category: security
+
+  - rule_id: security.private-key-block
+    level: error
+    target: file_content
+    match:
+      pattern: '-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----'
+    message: 疑似私钥块（BEGIN ... PRIVATE KEY）
+    category: security
+
+  - rule_id: security.bearer-token
+    level: warn
+    target: file_content
+    match:
+      pattern: 'Bearer\s+[A-Za-z0-9._\-]{20,}'
+    message: 疑似明文 Bearer 凭证
+    category: security
+
+  # ---- 连接串 / 口令（warn：误报可接受，靠 ignore 消化）----
+  - rule_id: security.db-connection-string
+    level: warn
+    target: file_content
+    match:
+      pattern: '(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqp)://[^\s:@/]+:[^\s:@/]+@'
+    message: 连接串内含明文账号口令
+    category: security
+
+  - rule_id: security.password-assignment
+    level: warn
+    target: file_content
+    match:
+      pattern: "\\bpassword\\s*=\\s*['\"][^'\"]{4,}['\"]"
+      flags: [i]
+    message: 明文口令赋值（password=...）
+    category: security
+
+  # ---- 危险命令（warn：误报可能高，默认不拦）----
+  - rule_id: security.dangerous-command
+    level: warn
+    target: file_content
+    match:
+      pattern: 'rm\s+-rf\s+/(?:\s|$)|\bcurl\b[^\n|]{0,120}\|\s*(?:ba)?sh\b'
+    message: 疑似危险命令（rm -rf / 或 curl | sh）
+    category: security
+
+  - rule_id: security.sudo-usage
+    level: info
+    target: file_content
+    match:
+      pattern: '(?<![\w-])sudo\s+\w'
+    message: 脚本中使用了 sudo
+    category: security
