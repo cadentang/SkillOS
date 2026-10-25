@@ -9,9 +9,9 @@
 from __future__ import annotations
 
 import secrets
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, distinct, func, select
 from sqlalchemy.orm import Session
 
 from skillos.core.constants import DRIFT_SEVERITY
@@ -26,6 +26,12 @@ def _now() -> datetime:
     # SQLite DateTime 列不带时区（SQLAlchemy 默认 naive）—— 全层统一 naive UTC，
     # 避免写 offset-aware 比较 offset-naive 抛 TypeError
     return datetime.now(UTC).replace(tzinfo=None)
+
+
+# CR 状态取值（E-05.1）：与 `services/cr_service.CR_TRANSITIONS` 的目标值集合一致。
+# 这里复制一份是刻意的兜底 —— 仓储层不该 import 服务层（分层单向）。
+_CR_STATUSES = ("open", "approved", "rejected", "merged", "closed")
+_CR_TERMINAL_STATUSES = ("merged", "rejected", "closed")
 
 
 class CloudRepo:
@@ -244,6 +250,10 @@ class CloudRepo:
     def get_skill_by_slug(self, slug: str) -> models.Skill | None:
         return self.s.scalar(select(models.Skill).where(models.Skill.slug == slug))
 
+    def get_skill(self, skill_id: str) -> models.Skill | None:
+        """按 id 取（CR 只存 skill_id：合并/自动关闭都要从这里回查 slug 与归属）。"""
+        return self.s.get(models.Skill, skill_id)
+
     def record_checks(self, skill_id: str, findings: list[dict]) -> None:
         """门禁结果落库（FR-1.0.11 / NFR-9）：先清旧再写新，保持「最新一次」语义。
 
@@ -279,6 +289,79 @@ class CloudRepo:
             ))
         self.s.commit()
         return len(rows)
+
+    # ---------------------------------------------------------------- 用量上报（N-01.4/9）
+
+    def merge_usage_daily(self, rows: list[dict]) -> int:
+        """合并设备上报的日聚合行：按 (device_id, skill_id, date, via) **覆盖**，不累加。
+
+        `device_id` 必须是云端盖章的 token_id（每设备唯一），不采信设备自报值。
+        N-01.9 的断连补偿靠「设备每次全量重报 30 天 + 服务端覆盖合并」实现 ——
+        累加式 upsert 会让同一份数据重发一次就翻倍，那不是补偿而是污染。
+        """
+        merged = 0
+        for row in rows:
+            day = row["date"]
+            if isinstance(day, str):
+                day = date.fromisoformat(day)
+            existing = self.s.scalar(select(models.SkillUsageDaily).where(
+                models.SkillUsageDaily.device_id == row["device_id"],
+                models.SkillUsageDaily.skill_id == row["skill_id"],
+                models.SkillUsageDaily.date == day,
+                models.SkillUsageDaily.via == row["via"],
+            ))
+            if existing is None:
+                existing = models.SkillUsageDaily(
+                    id=f"ud_{secrets.token_hex(8)}",
+                    device_id=row["device_id"], skill_id=row["skill_id"],
+                    date=day, via=row["via"],
+                )
+                self.s.add(existing)
+            existing.count = int(row.get("count") or 0)
+            existing.tokens_in = int(row.get("tokens_in") or 0)
+            existing.tokens_out = int(row.get("tokens_out") or 0)
+            existing.duration_ms_p50 = row.get("duration_ms_p50")
+            existing.duration_ms_p95 = row.get("duration_ms_p95")
+            existing.by_op = row.get("by_op")
+            merged += 1
+        self.s.commit()
+        return merged
+
+    def usage_summary(self, *, days: int = 30,
+                      device_ids: list[str] | None = None) -> list[dict]:
+        """跨设备按 skill 汇总（N-01.6：团队视图只见总调用次数，不看个人明细）。
+
+        `device_ids` 是**必需的租户边界**：表里没有 user_id，不按设备过滤就等于把
+        别的账号的调用次数加进来。传 None 只用于跨租户的内部统计，接口层不得省略。
+        """
+        since = (datetime.now(UTC) - timedelta(days=days - 1)).date()
+        stmt = (
+            select(
+                models.SkillUsageDaily.skill_id,
+                func.sum(models.SkillUsageDaily.count),
+                func.sum(models.SkillUsageDaily.tokens_in),
+                func.sum(models.SkillUsageDaily.tokens_out),
+                func.count(distinct(models.SkillUsageDaily.device_id)),
+            )
+            .where(models.SkillUsageDaily.date >= since)
+            .group_by(models.SkillUsageDaily.skill_id)
+            .order_by(func.sum(models.SkillUsageDaily.count).desc())
+        )
+        if device_ids is not None:
+            if not device_ids:
+                return []   # 无设备 ⇒ 空结果，绝不退化成"全表"
+            stmt = stmt.where(models.SkillUsageDaily.device_id.in_(device_ids))
+        rows = self.s.execute(stmt).all()
+        return [
+            {
+                "skill_id": skill_id,
+                "count": int(count or 0),
+                "tokens_in": int(tin or 0),
+                "tokens_out": int(tout or 0),
+                "device_count": int(devices or 0),
+            }
+            for skill_id, count, tin, tout, devices in rows
+        ]
 
     # ---------------------------------------------------------------- Team & 协作（P6，FR-3.7）
 
@@ -388,21 +471,41 @@ class CloudRepo:
         return list(self.s.scalars(q.order_by(models.ChangeRequest.created_at)))
 
     def set_cr_status(self, cr_id: str, status: str,
-                      reviewer_id: str) -> models.ChangeRequest | None:
-        if status not in ("open", "merged", "closed"):
+                      reviewer_id: str | None, *,
+                      from_statuses: tuple[str, ...] | None = None,
+                      ) -> models.ChangeRequest | None:
+        """写 CR 状态（合法边由 `services/cr_service` 判定，本层只兜底两道闸）。
+
+        - 取值必须在白名单内：绕过服务直接改也写不进非法状态（DB CHECK 是第二道）；
+        - 终态不可再改（FR-3.16 不可变审计）；
+        - `from_statuses` 做乐观并发：两个审查者同时点，后到的那个必须失败而不是覆盖。
+        """
+        if status not in _CR_STATUSES:
             raise ValueError(status)
         cr = self.s.get(models.ChangeRequest, cr_id)
         if cr is None:
             return None
-        if cr.status != "open":
-            raise ValueError("CR 已终结，不可再次审查（FR-3.16 不可变审计）")
+        if cr.status in _CR_TERMINAL_STATUSES:
+            raise ValueError("CR 已终结，不可再次变更（FR-3.16 不可变审计）")
+        if from_statuses is not None and cr.status not in from_statuses:
+            raise ValueError(f"CR 当前状态 {cr.status} 不允许该操作")
         cr.status = status
-        cr.reviewer_id = reviewer_id
+        if reviewer_id is not None:
+            cr.reviewer_id = reviewer_id
         cr.updated_at = _now()
         self.s.commit()
         return cr
 
-    def add_cr_comment(self, cr_id: str, author_id: str, body: str) -> models.CrComment:
+    def list_skill_crs(self, skill_id: str) -> list[models.ChangeRequest]:
+        """某 Skill 的全部 CR（E-05.6 目标被删除时批量收口用）。"""
+        return list(self.s.scalars(
+            select(models.ChangeRequest)
+            .where(models.ChangeRequest.skill_id == skill_id)
+            .order_by(models.ChangeRequest.created_at)
+        ))
+
+    def add_cr_comment(self, cr_id: str, author_id: str | None, body: str) -> models.CrComment:
+        """`author_id=None` = 系统评论（GATE_FAILED / 目标已删除），与真人评论同样只增不删。"""
         if not body.strip():
             raise ValueError("评论为空")
         c = models.CrComment(
