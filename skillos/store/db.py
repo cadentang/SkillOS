@@ -63,6 +63,16 @@ def _migrate(engine: Engine) -> None:
             ("tokens_out",
              "ALTER TABLE skill_usage_events ADD COLUMN tokens_out INTEGER DEFAULT 0"),
         ],
+        # N-07.3：弃用软状态（canonical 保留、bindings 回收，可恢复）
+        "skills": [
+            ("deprecated", "ALTER TABLE skills ADD COLUMN deprecated BOOLEAN NOT NULL DEFAULT 0"),
+        ],
+        # E-08.4：连续网络失败计数（满 3 次才置 error）
+        "upstream_sources": [
+            ("consecutive_failures",
+             "ALTER TABLE upstream_sources ADD COLUMN consecutive_failures "
+             "INTEGER NOT NULL DEFAULT 0"),
+        ],
     }
     with engine.begin() as conn:
         if engine.dialect.name == "sqlite":

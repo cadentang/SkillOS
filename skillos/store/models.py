@@ -128,6 +128,8 @@ class Skill(Base):
     # 只描述来源类别；上游 url/ref/hash 唯一权威在 upstream_sources（FR-1.0.13）
     source_kind: Mapped[str] = mapped_column(Text, nullable=False, default="local")
     is_fork: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # N-07.3：弃用软状态 —— canonical 保留、bindings 回收；重新 push 即恢复（N-07.5）
+    deprecated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
 
@@ -289,6 +291,10 @@ class UpstreamSource(Base):
     upstream_hash: Mapped[str | None] = mapped_column(Text)
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime)
     status: Mapped[str] = mapped_column(Text, nullable=False, default="unknown")
+    # E-08.4：连续网络失败计数 —— 满 3 次才置 error（单次抖动不该降级健康度）
+    consecutive_failures: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0",
+    )
 
 
 class SkillCheck(Base):
@@ -317,6 +323,8 @@ class SkillCheck(Base):
     level: Mapped[str] = mapped_column(Text, nullable=False)
     message: Mapped[str] = mapped_column(Text, nullable=False)
     value: Mapped[str | None] = mapped_column(Text)  # JSON：decay 原始测量值 / 门禁附加信息
+    # N-03.5：本次 check 生效的规则集指纹（只对 gate 行有意义），历史结果据此可复现
+    ruleset_hash: Mapped[str | None] = mapped_column(Text)
     at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
 
 
@@ -324,8 +332,8 @@ class SkillUsageDaily(Base):
     """日聚合表（N-01.3 / N-11.6，本地与云端**同构**）。
 
     冲突键 `(device_id, skill_id, date, via)` 是云端合并与补报去重的落点（V2-T9）：
-    `INSERT ... ON CONFLICT DO UPDATE SET count = count + excluded.count`，
-    所以这里必须声明同名唯一约束。
+    同键行**覆盖**（不累加）—— 设备每次报的是"近 30 天全量"，累加式 upsert 会把
+    一次重连补报变成双倍计数（N-01.9）。所以这里必须声明同名唯一约束。
     """
 
     __tablename__ = "skill_usage_daily"
@@ -335,7 +343,7 @@ class SkillUsageDaily(Base):
     )
 
     id: Mapped[str] = mapped_column(Text, primary_key=True)
-    device_id: Mapped[str] = mapped_column(Text, nullable=False)   # 本地固定 'local'
+    device_id: Mapped[str] = mapped_column(Text, nullable=False)   # 本地 'local'；云端 = token_id
     skill_id: Mapped[str] = mapped_column(Text, nullable=False)    # skill slug
     date: Mapped[date] = mapped_column(Date, nullable=False)       # 聚合日（UTC）
     via: Mapped[str] = mapped_column(Text, nullable=False)         # mcp / web / cli / daemon
@@ -391,6 +399,29 @@ class AppSetting(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
 
 
+class HealthReport(Base):
+    """体检报告（N-02.3）：**本地表**，只在 daemon / CLI 侧生成（云端不碰磁盘，红线 5）。
+
+    `payload` 是 JSON，同时承担两种角色：
+    - **展示**：本期增量（漂移净增计数 + Top10 skill、门禁 error 新增、decay ok→degraded、
+      健康度降幅 Top5），按需求截断；
+    - **基线**：各态 slug 集合与每 skill 健康分 —— 没有基线就只能报"现在是什么"，
+      报不出"自上次报告以来新增了什么"（N-02.2），而那才是报告的意义。
+    `unchanged` 独立成列：列表徽标与筛选不该去解析 JSON（N-02.6 要求无变化也留痕）。
+    """
+
+    __tablename__ = "health_reports"
+    __table_args__ = (Index("ix_health_reports_created", "created_at"),)
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    device_id: Mapped[str] = mapped_column(Text, nullable=False, default="local")
+    period_start: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    period_end: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    payload: Mapped[str] = mapped_column(Text, nullable=False)      # JSON
+    unchanged: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
+
+
 class SkillSimilarity(Base):
     __tablename__ = "skill_similarity"
     __table_args__ = (
@@ -407,16 +438,21 @@ class SkillSimilarity(Base):
 
 
 class ChangeRequest(Base):
-    """协作 CR（FR-2.3.3 / FR-3.7 / FR-3.16）。
+    """协作 CR（FR-2.3.3 / FR-3.7 / FR-3.16 / E-05）。
 
     - CR 自身 + CrComment 表即为审计源；**应用层不提供改写 / 删除接口**（FR-3.16）。
-    - 状态机：open → closed（reviewer 驳回）/ merged（owner 合并）；merged 后写回
-      canonical 的 `head_version`，触发下一阶段团队 binding push。
+    - 状态机（E-05.1，迁移表在 `services/cr_service.py`，这里只兜底约束取值）：
+      `open → approved → merged`；`open → rejected`；`open/approved → closed`。
+      merged / rejected / closed 均为终态，禁止回跳。
+    - 库层 CHECK 是第二道闸：即便有人绕过服务直接改 status，也写不进非法取值。
     """
 
     __tablename__ = "change_requests"
     __table_args__ = (
-        CheckConstraint("status IN ('open','merged','closed')", name="ck_cr_status"),
+        CheckConstraint(
+            "status IN ('open','approved','rejected','merged','closed')",
+            name="ck_cr_status",
+        ),
     )
 
     id: Mapped[str] = mapped_column(Text, primary_key=True)
