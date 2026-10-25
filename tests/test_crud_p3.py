@@ -70,7 +70,7 @@ class TestCreateSkill:
         engine, _ = env
         engine.init_env()
         engine.import_skills()
-        with pytest.raises(ValueError, match="SLUG_EXISTS"):
+        with pytest.raises(ValueError, match="NAME_CONFLICT"):
             engine.create_skill("demo", name="demo", description="x" * 40)
 
     def test_create_case_collision_rejected(self, env) -> None:
@@ -147,7 +147,7 @@ class TestTaskExecutorCreate:
         assert engine.db.get_skill_by_slug("via-ws") is not None
 
     def test_skill_create_slug_exists_maps_code(self, env) -> None:
-        """SLUG_EXISTS 必须原样透传到信封 code（前端按 code 分支提示）。"""
+        """NAME_CONFLICT 必须原样透传到信封 code（前端按 code 分支提示，E-07.4）。"""
         from skillos.daemon.main import TaskExecutor
 
         engine, _ = env
@@ -158,7 +158,7 @@ class TestTaskExecutorCreate:
             "slug": "demo", "name": "demo", "description": "x" * 40,
         })
         assert r["ok"] is False
-        assert r["error"]["code"] == "SLUG_EXISTS"
+        assert r["error"]["code"] == "NAME_CONFLICT"
 
 
 class TestDeleteSkill:

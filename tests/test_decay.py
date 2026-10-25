@@ -112,8 +112,12 @@ class TestDependencyBroken:
 
 
 class TestUpstreamDivergence:
-    def test_unknown_before_e08(self) -> None:
-        """E-02.5：E-08 未启用 ⇒ 恒 unknown，且**不扣分**（unknown 不加减）。"""
+    def test_unknown_without_upstream_record(self) -> None:
+        """E-08.2 / E-08.5：无 `upstream_sources` 记录 ⇒ 维度 unknown，且不扣分。
+
+        E-08 启用后不再是"全局恒 unknown"：有记录的 skill 会得到 current/outdated。
+        映射见 `TestUpstreamMapping`（tests/test_m5_upstream.py）。
+        """
         r = _eval(upstream_status=None)
         assert r.upstream_divergence is DecayStatus.UNKNOWN
 

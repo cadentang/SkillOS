@@ -135,31 +135,51 @@ def _setup_team_with_skill(app: TestClient, owner_token: str) -> str:
     return team_id
 
 
-def test_cr_open_then_merged_terminal(app: TestClient):
+def test_cr_open_then_approved_then_terminal(app: TestClient):
+    """E-05.1：open → approved →（终态）；open 不可直接 merged。
+
+    合并要过门禁与 STALE，必须有 daemon，所以这里只验审查段与终态不可回跳；
+    合并的全部路径见 `tests/test_m4_cr.py`（带 daemon 替身）。
+    """
     owner = _reg(app, "o@x.com")
     team_id = _setup_team_with_skill(app, owner)
     cr = app.post(f"/api/teams/{team_id}/change-requests",
                   headers=_auth(owner),
                   json={"skill_slug": "demo", "title": "impl"}).json()["data"]
     assert cr["status"] == "open"
+    assert cr["next_events"] == ["approve", "reject", "close"]
 
-    # owner 合并
-    r = app.post(f"/api/teams/{team_id}/change-requests/{cr['id']}/review",
-                 headers=_auth(owner), json={"action": "merged"})
-    assert r.status_code == 200 and r.json()["data"]["status"] == "merged"
+    # open 直接合并 → 非法边（必须先审查通过）
+    r = app.post(f"/api/teams/{team_id}/change-requests/{cr['id']}/merge",
+                 headers=_auth(owner), json={})
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "INVALID_TRANSITION"
 
-    # 已终结，再次审查 → 409（FR-3.16）
+    # 审查通过
     r = app.post(f"/api/teams/{team_id}/change-requests/{cr['id']}/review",
-                 headers=_auth(owner), json={"action": "closed"})
+                 headers=_auth(owner), json={"action": "approve"})
+    assert r.status_code == 200 and r.json()["data"]["status"] == "approved"
+    assert r.json()["data"]["next_events"] == ["merge", "close"]
+
+    # 关闭（终态），再审查 → 409（FR-3.16）
+    r = app.post(f"/api/teams/{team_id}/change-requests/{cr['id']}/review",
+                 headers=_auth(owner), json={"action": "close"})
+    assert r.json()["data"]["status"] == "closed"
+    r = app.post(f"/api/teams/{team_id}/change-requests/{cr['id']}/review",
+                 headers=_auth(owner), json={"action": "approve"})
     assert r.status_code == 409
+    assert r.json()["detail"]["code"] == "CR_TERMINAL"
 
 
-def test_member_can_comment_owner_can_review(app: TestClient):
+def test_member_can_comment_and_review_viewer_cannot(app: TestClient):
+    """E-05.1：审查权 = owner / member；viewer 一律 403（P6 的「仅 owner」已放宽）。"""
     owner = _reg(app, "o@x.com")
     member = _reg(app, "m@x.com")
+    viewer = _reg(app, "v@x.com")
     team_id = _setup_team_with_skill(app, owner)
     app.post(f"/api/teams/{team_id}/members", headers=_auth(owner),
              json={"email": "m@x.com", "role": "member"})
+    app.post(f"/api/teams/{team_id}/members", headers=_auth(owner),
+             json={"email": "v@x.com", "role": "viewer"})
     cr_id = app.post(f"/api/teams/{team_id}/change-requests",
                      headers=_auth(member),
                      json={"skill_slug": "demo", "title": "new"}).json()["data"]["id"]
@@ -167,10 +187,14 @@ def test_member_can_comment_owner_can_review(app: TestClient):
     r = app.post(f"/api/teams/{team_id}/change-requests/{cr_id}/comments",
                  headers=_auth(member), json={"body": "lgtm"})
     assert r.status_code == 200
-    # member 不能审查
+    # viewer 不能审查
     r = app.post(f"/api/teams/{team_id}/change-requests/{cr_id}/review",
-                 headers=_auth(member), json={"action": "merged"})
+                 headers=_auth(viewer), json={"action": "approve"})
     assert r.status_code == 403
+    # member 可以审查（approve）
+    r = app.post(f"/api/teams/{team_id}/change-requests/{cr_id}/review",
+                 headers=_auth(member), json={"action": "approve"})
+    assert r.status_code == 200 and r.json()["data"]["status"] == "approved"
 
 
 def test_no_delete_or_update_comment_endpoint(app: TestClient):

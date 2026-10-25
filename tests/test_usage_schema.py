@@ -88,9 +88,15 @@ class TestAlembicRevision:
 
         engine = make_engine(f"sqlite:///{db_path}")
         names = set(inspect(engine).get_table_names())
-        assert {"skill_usage_daily", "skill_usage_events"} <= names
+        assert {"skill_usage_daily", "skill_usage_events", "health_reports"} <= names
         columns = {c["name"] for c in inspect(engine).get_columns("skill_usage_daily")}
         assert columns == EXPECTED_DAILY_COLUMNS
+        # M2-08：报告表的 payload / unchanged 是"展示 + 基线"双角色的落点
+        report_cols = {c["name"] for c in inspect(engine).get_columns("health_reports")}
+        assert report_cols == {
+            "id", "device_id", "period_start", "period_end",
+            "payload", "unchanged", "created_at",
+        }
 
     def test_downgrade_removes_them(self, tmp_path, monkeypatch) -> None:
         db_path = tmp_path / "cloud2.db"

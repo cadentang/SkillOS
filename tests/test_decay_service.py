@@ -118,6 +118,7 @@ class TestDecayWiring:
         result = svc.decay("alpha")
         assert result.staleness is DecayStatus.DEGRADED      # 200 天且零被引用
         assert result.dependency_broken is DecayStatus.DEGRADED  # beta 不在库内
+        # E-08.2：该 fixture 没有 upstream_sources 记录 ⇒ 上游维度 unknown（有记录才判定）
         assert result.upstream_divergence is DecayStatus.UNKNOWN
         assert result.value["days_since"] == 200
         assert result.value["missing_deps"] == ["beta"]

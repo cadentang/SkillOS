@@ -52,6 +52,9 @@ class TestSettingsRoutesRegistered:
         ("GET", "/api/runtimes/discovered"),
         # Settings · 守护区块
         ("GET", "/api/daemon/status"),
+        # Settings · 用量区块（N-01.4/6）
+        ("POST", "/api/daemon/usage/sync"),
+        ("GET", "/api/daemon/usage/summary"),
         # Settings · 协议区块（FR-1.0.29 / T18）—— 这次 404 的就是它
         ("GET", "/api/protocol/status"),
     ]
@@ -111,3 +114,97 @@ class TestProtocolStatusOffline:
         assert "protocol_status" in WS_TASK_OPS, (
             "protocol_status 不在 WS_TASK_OPS → 云端路由会拒(500)"
         )
+
+
+class TestUsageRoutes:
+    """用量上报路由（N-01.4/6/9）：离线要给**显式错误码**，不能伪装成空数据."""
+
+    def test_sync_offline_returns_explicit_code(self, client):
+        """daemon 离线 → 200 + ok:false + DAEMON_OFFLINE。
+
+        「没数据」与「设备不在线」是两件事 —— 混成空列表就等于谎报成功。
+        """
+        token = _token(client)
+        r = client.post(
+            "/api/daemon/usage/sync",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["ok"] is False
+        assert body["error"]["code"] == "DAEMON_OFFLINE"
+
+    def test_summary_without_devices_is_empty(self, client):
+        """没有配对设备 ⇒ 空结果（绝不退化成全表跨租户聚合）。"""
+        token = _token(client)
+        r = client.get(
+            "/api/daemon/usage/summary?days=30",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["ok"] is True
+        assert body["data"]["days"] == 30
+        assert body["data"]["items"] == []
+
+    def test_summary_clamps_days(self, client):
+        """days 夹紧到 1~180，避免超大窗口全表扫。"""
+        token = _token(client)
+        r = client.get(
+            "/api/daemon/usage/summary?days=9999",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert r.json()["data"]["days"] == 180
+
+    def test_usage_report_op_in_whitelist(self):
+        assert "usage_report" in WS_TASK_OPS, (
+            "usage_report 不在 WS_TASK_OPS → 云端拉取会被拒（OUT-14 白名单）"
+        )
+
+
+class TestM2LocalRoutes:
+    """V2-M2：本地数据（开关 / 榜单 / 调用记录 / 报告）全部经 daemon 具名 op 取。"""
+
+    ENDPOINTS = [
+        ("GET", "/api/settings"),
+        ("PUT", "/api/settings"),
+        ("GET", "/api/usage/summary"),
+        ("GET", "/api/skills/demo/usage"),
+        ("GET", "/api/reports"),
+        ("GET", "/api/reports/r1"),
+    ]
+
+    @pytest.mark.parametrize("method,path", ENDPOINTS)
+    def test_endpoint_registered(self, client, method, path):
+        assert client.request(method, path).status_code == 401, (
+            f"{method} {path} 应 401（路由存在）而不是 404（未注册）"
+        )
+
+    @pytest.mark.parametrize("path", [
+        "/api/settings", "/api/usage/summary", "/api/skills/demo/usage", "/api/reports",
+    ])
+    def test_offline_returns_explicit_code(self, client, path):
+        """daemon 离线 → 200 + ok:false + DAEMON_OFFLINE（不伪装成空数据）。"""
+        token = _token(client)
+        body = client.get(path, headers={"Authorization": f"Bearer {token}"}).json()
+        assert body["ok"] is False
+        assert body["error"]["code"] == "DAEMON_OFFLINE"
+
+    def test_settings_put_offline_returns_explicit_code(self, client):
+        token = _token(client)
+        body = client.put(
+            "/api/settings",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"items": {"usage_report_enabled": True}},
+        ).json()
+        assert body["ok"] is False
+        assert body["error"]["code"] == "DAEMON_OFFLINE"
+
+    def test_m2_ops_in_whitelist(self):
+        """OUT-14：新增能力必须是具名 op 且进白名单，云端才下发得出去。"""
+        required = {
+            "settings_get", "settings_put", "usage_summary", "usage_events",
+            "report_list", "report_get",
+        }
+        assert required <= WS_TASK_OPS, sorted(required - WS_TASK_OPS)
+

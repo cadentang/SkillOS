@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-import skillos.services.engine as engine_module
+import skillos.services.check_service as check_service_module
 from skillos.services.engine import EnvPaths, LocalEngine
 
 # 故意缺 description：命中 fm.description.required（error → push 必被拦）
@@ -47,16 +47,22 @@ def _serialize(gate) -> list[dict]:
 
 @pytest.fixture()
 def spy(monkeypatch):
-    """记录 engine 里每一次 run_gate 的实际结果，供两条路径比对。"""
-    calls: list[list[dict]] = []
-    real = engine_module.run_gate
+    """记录每一次 gate 判定的实际结果，供两条路径比对。
 
-    def wrapper(snapshot, ctx):
-        result = real(snapshot, ctx)
+    打的是 `check_service.run_gate` —— 那是**唯一实现点**：CLI check 经
+    `CheckService.gate_of` 进来，push / 文件写入 / 新建经 `engine._gate_of_snapshot`
+    进来，两条路径最终都落在这一个符号上。补丁打在 engine 上会看不到 check 路径
+    （engine 已不再直接调 `run_gate`），测试会假绿。
+    """
+    calls: list[list[dict]] = []
+    real = check_service_module.run_gate
+
+    def wrapper(snapshot, ctx, **kwargs):
+        result = real(snapshot, ctx, **kwargs)
         calls.append(_serialize(result))
         return result
 
-    monkeypatch.setattr(engine_module, "run_gate", wrapper)
+    monkeypatch.setattr(check_service_module, "run_gate", wrapper)
     return calls
 
 
