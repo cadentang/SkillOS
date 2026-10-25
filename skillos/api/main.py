@@ -28,17 +28,22 @@ from skillos.api.routes import (
     files,
     logs,
     protocol,
+    reports,
+    rules,
     runtimes,
+    settings,
     skills,
     sync,
     teams,
     upstream,
+    usage,
     versions,
 )
 from skillos.api.routes import sandbox as sandbox_routes
 from skillos.api.security import hash_token, new_agent_token
 from skillos.api.web import mount_web
 from skillos.api.ws_hub import AgentConn, WsHub
+from skillos.core.constants import WS_EVENTS
 from skillos.core.logging import (
     bind_op_id,
     get_logger,
@@ -202,6 +207,10 @@ def create_app(db_url: str | None = None, jwt_secret: str | None = None,
         protocol.router,  # FR-2.4.10 Settings "协议版本" 区块
         teams.router,
         logs.router,  # FR-1.1.12：daemon 日志查看代理
+        settings.router,  # V2-T1 设备侧开关（采集 / 上报 / L2 路径）
+        usage.router,     # N-01.7/8 管理者视图 + N-11.7 调用记录
+        reports.router,   # N-02 体检报告（本地表，daemon 生成）
+        rules.router,     # N-03/N-08 规则面板 + E-04/N-07 相似对
     )
     if sandbox:
         # 仅沙盒部署存在 reset 入口（04 §2.7.7）；云端不碰磁盘，恢复在 daemon 侧
@@ -374,7 +383,7 @@ def create_app(db_url: str | None = None, jwt_secret: str | None = None,
                             continue
                         await app.state.hub.handle_result(req_id, msg)
                     elif mtype == "event":
-                        await _handle_event(app, msg)
+                        await _handle_event(app, msg, conn)
                     else:
                         await ws.send_json({
                             "type": "error",
@@ -456,19 +465,29 @@ async def _deny(ws: WebSocket, code: str, message: str) -> None:
     await ws.close(code=4003, reason=code)
 
 
-async def _handle_event(app: FastAPI, msg: dict) -> None:
-    """daemon 事件：drift_changed → upsert 漂移矩阵 + UI 广播（FR-1.2.6）。
+async def _handle_event(app: FastAPI, msg: dict, conn: AgentConn) -> None:
+    """daemon 上行事件（WS_EVENTS 白名单）：
+    - `drift_changed` → upsert 漂移矩阵 + UI 广播（FR-1.2.6）
+    - `usage_report` → 清洗合并用量聚合行 + ack + UI 广播（N-01.4/9）
 
+    归属一律取**认证连接**（conn.user_id / conn.agent_id），不采信报文里的
+    `user_id` —— 否则任何一台 daemon 都能往别人账号里写数据。
     每次事件新开短会话：认证会话已随注册关闭，长连接期间不能有
     Session 挂住池连接（见 ws_agent 内注释）。
     """
     event = msg.get("event")
     payload = msg.get("payload") or {}
-    if event != "drift_changed":
+    if event not in WS_EVENTS:
+        await conn.ws.send_json({"type": "error", "error": {
+            "code": "UNKNOWN_EVENT", "message": f"未登记的上行事件: {event}",
+        }})
         return
-    user_id = msg.get("user_id") or ""
-    if not user_id:
+    user_id = conn.user_id
+
+    if event == "usage_report":
+        await _ingest_usage_report(app, conn, payload)
         return
+
     from skillos.store.cloud_repo import drift_summary
 
     with app.state.session_factory() as session:
@@ -478,3 +497,33 @@ async def _handle_event(app: FastAPI, msg: dict) -> None:
     await app.state.hub.broadcast_ui({
         "type": "drift_changed", "summary": summary,
     }, user_id=user_id)
+
+
+async def _ingest_usage_report(app: FastAPI, conn: AgentConn, payload: dict) -> None:
+    """合并 daemon 主动上报的聚合行（N-01.4 每日上报 / N-01.9 重连补报）。
+
+    幂等靠 `merge_usage_daily` 的**覆盖**语义：同一份 30 天全量重发不翻倍。
+    `device_id` 用 `conn.device_id`（= token_id，每设备唯一）盖章 —— 设备自报值一律不用。
+    ack 里回 `merged` / `skipped`，让设备侧日志能证明"报上去了"而不是"发出去了"。
+    """
+    from skillos.core.algorithm.usage import sanitize_report_rows
+
+    try:
+        rows, skipped = sanitize_report_rows(
+            payload.get("rows"), device_id=conn.device_id,
+        )
+    except ValueError as exc:
+        log.warning("usage_report_rejected", agent_id=conn.agent_id, reason=str(exc))
+        await conn.ws.send_json({"type": "event_ack", "event": "usage_report",
+                                 "ok": False,
+                                 "error": {"code": "INVALID_INPUT", "message": str(exc)}})
+        return
+
+    with app.state.session_factory() as session:
+        merged = CloudRepo(session).merge_usage_daily(rows)
+    log.info("usage_report_merged", agent_id=conn.agent_id,
+             user_id=conn.user_id, merged=merged, skipped=skipped)
+    await conn.ws.send_json({"type": "event_ack", "event": "usage_report",
+                             "ok": True, "merged": merged, "skipped": skipped})
+    await app.state.hub.broadcast_ui({"type": "usage_changed", "merged": merged},
+                                     user_id=conn.user_id)

@@ -17,9 +17,16 @@ router = APIRouter(prefix="/skills", tags=["skills"])
 
 
 class SkillCreateRequest(BaseModel):
+    """新建 Skill（E-07）：四步向导的产物。
+
+    `template` 由后端最终校验（未知取值 → VALIDATION）：前端下拉框是可绕过的一层。
+    """
+
     slug: str
     name: str = ""
     description: str
+    category: str = ""
+    template: str = "minimal"
     author: str = "web <web@skillos.local>"
 
 
@@ -67,7 +74,9 @@ async def skill_create(body: SkillCreateRequest, request: Request,
                 "data": None}
     return await _submit(request, user_id, "skill_create", {
         "slug": body.slug, "name": body.name,
-        "description": body.description, "author": body.author,
+        "description": body.description,
+        "category": body.category, "template": body.template,
+        "author": body.author,
     })
 
 

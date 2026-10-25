@@ -35,6 +35,15 @@ class AgentConn:
     token_id: str
     connected_at: float = field(default_factory=time.time)
 
+    @property
+    def device_id(self) -> str:
+        """数据分桶用的**设备身份 = token_id**（每设备唯一）。
+
+        不用 `agent_id`（`platform-hostname`）：同账号两台同名机器会撞进同一个桶，
+        跨设备汇总少算、`device_count` 也恒为 1。token 是配对时签发的，天然一机一份。
+        """
+        return self.token_id
+
 
 @dataclass
 class PendingTask:
@@ -135,6 +144,16 @@ class WsHub:
 
         request_id 云端生成、全局唯一（07 N12）；无 request_id 的任务 daemon 会拒绝。
         """
+        _, payload = await self.submit_task_with_conn(user_id, op, params, timeout=timeout)
+        return payload
+
+    async def submit_task_with_conn(self, user_id: str, op: str, params: dict,
+                                    timeout: float = 60.0) -> tuple[AgentConn, dict]:
+        """同 submit_task，但一并返回**应答的那条连接**（取 `conn.device_id` 用）。
+
+        跨设备归并需要设备归属（N-01.6 团队视图按设备分桶，N-01.9 去重键含 device_id）：
+        设备自报的 device_id 可被伪造/重复，云端以实际应答连接为准才是权威。
+        """
         from skillos.core.constants import WS_TASK_OPS
 
         if op not in WS_TASK_OPS:
@@ -156,11 +175,12 @@ class WsHub:
                 "type": "task", "task_id": task_id, "request_id": request_id,
                 "op": op, "params": params,
             })
-            return await asyncio.wait_for(future, timeout=timeout)
+            return agent, await asyncio.wait_for(future, timeout=timeout)
         except TimeoutError:
             async with self._lock:
                 self.pending.pop(request_id, None)
-            return {"ok": False, "error": {"code": "TIMEOUT", "message": "daemon 未在时限内响应"}}
+            return agent, {"ok": False,
+                           "error": {"code": "TIMEOUT", "message": "daemon 未在时限内响应"}}
 
     # ---------------------------------------------------------------- UI 通道
 

@@ -48,12 +48,14 @@ def require_viewer(repo: CloudRepo, team_id: str, user_id: str) -> tuple[str, st
     return require_team_role(repo, team_id, user_id, min_role="viewer")
 
 
-# CR 状态机（FR-3.16 不可变审计）
+# CR 状态机（FR-3.16 不可变审计 / E-05.1 五态）
+# 迁移边与判定不在这里 —— 唯一事实源是 `skillos/services/cr_service.py`
+# 的 `CR_TRANSITIONS`；本模块只声明「取值集合」给列表过滤与序列化用。
 
-CR_STATUSES = ("open", "merged", "closed")
-CR_TERMINAL = ("merged", "closed")
+CR_STATUSES = ("open", "approved", "rejected", "merged", "closed")
+CR_TERMINAL = ("merged", "rejected", "closed")
 
 
 def is_terminated(status: str) -> bool:
-    """CR 一旦进入 merged/closed 即终结，再次审查 / 状态变更应拒绝。"""
+    """CR 一旦进入 merged/rejected/closed 即终结，再次变更应拒绝。"""
     return status in CR_TERMINAL
