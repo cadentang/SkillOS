@@ -529,28 +529,66 @@ def rollback(
 @app.command()
 def check(
     skill: str = typer.Option(None, "--skill"),
+    all_: bool = typer.Option(False, "--all", help="检查全部 Skill 并落库"),
+    security_only: bool = typer.Option(
+        False, "--security-only", help="只跑 category=security 的自定义规则（N-08.5，CI 用）",
+    ),
     repo: str = typer.Option(None, "--repo", help="canonical 仓库路径"),
 ) -> None:
-    """质量检查（FR-1.0.11，规则表见 core/algorithm/checks.py）。"""
+    """质量检查（FR-1.0.11 + N-03 自定义规则 + N-08 安全规则）。
+
+    结果落 `skill_checks`（含本次 `ruleset_hash`，N-03.5）。`--security-only`
+    只跑安全类规则，输出与退出码语义不变（有 error → 退出码 1）。
+    """
     engine = _make_engine(repo)
-    if not skill:
+    if not skill and not all_:
         console.print(
-            "[yellow]用法: skillos check --skill <slug>[/yellow]\n"
-            "[dim]全量检查（--all）走 P2；当前逐个 skill 检查[/dim]"
+            "[yellow]用法: skillos check --skill <slug> | --all[/yellow]\n"
+            "[dim]--security-only 只跑安全规则集（CI 用）[/dim]"
         )
         raise typer.Exit(EXIT_USAGE)
+    slugs = engine.all_slugs() if all_ else [skill]
+    if all_ and not slugs:
+        console.print("[yellow]库里还没有 Skill（先 scan + import）[/yellow]")
+        raise typer.Exit(EXIT_USAGE)
+
+    has_error = False
+    total = 0
+    for slug in slugs:
+        try:
+            report = engine.checks.check(
+                slug, security_only=security_only, include_untracked=True,
+            )
+        except Exception as e:  # noqa: BLE001 —— 单个 skill 读不出来不该中断 --all
+            console.print(f"[red]{slug}: 无法读取 canonical: {e}[/red]")
+            has_error = True
+            continue
+        findings = report.gate.findings
+        total += len(findings)
+        if len(slugs) > 1:
+            console.print(f"\n[bold]{slug}[/bold]")
+        for f in findings:
+            style = "red" if f.level == "error" else ("yellow" if f.level == "warn" else "dim")
+            console.print(f"[{style}]{f.level:5} {f.rule}: {f.message}[/{style}]")
+        for row in report.bundle.invalid:
+            console.print(f"[yellow]invalid {row['rule']}: {row['message']}[/yellow]")
+        has_error = has_error or report.gate.has_error
+
+    # E-04.2 / TQ-03：check 尾部顺带重算相似对（旁路能力，不影响退出码）
     try:
-        result = engine.gate_of(skill)
-    except Exception as e:
-        console.print(f"[red]无法读取 canonical: {e}[/red]")
-        raise typer.Exit(EXIT_FAIL) from e
-    for f in result.findings:
-        style = "red" if f.level == "error" else ("yellow" if f.level == "warn" else "dim")
-        console.print(f"[{style}]{f.level:5} {f.rule}: {f.message}[/{style}]")
-    if not result.findings:
+        engine.run_similarity()
+    except Exception as e:  # noqa: BLE001 —— 相似提示坏了不该让检查结论变得不可用
+        console.print(f"[yellow]相似比对失败：{e}[/yellow]")
+
+    ruleset = engine.rules.ruleset_hash()
+    console.print(
+        f"\n[dim]规则集 {ruleset[:10] or '（无自定义规则）'} · "
+        f"{len(slugs)} 个 Skill · {total} 条 finding[/dim]"
+    )
+    if not has_error and total == 0:
         console.print("[green]✓ 检查通过，无发现[/green]")
         raise typer.Exit(EXIT_OK)
-    if result.has_error:
+    if has_error:
         raise typer.Exit(EXIT_FAIL)
 
 
@@ -661,6 +699,70 @@ def logs() -> None:
     from skillos.cli.logs_cmd import logs_cmd
 
     logs_cmd()
+
+
+# ---------------------------------------------------------------- 体检报告（N-02）
+
+@app.command()
+def report(
+    last: bool = typer.Option(False, "--last", help="只看最近一份，不生成新报告"),
+    repo: str = typer.Option(None, "--repo", help="canonical 仓库路径"),
+) -> None:
+    """体检报告（N-02）：默认生成一份新报告（自上一份以来的增量）。
+
+    无 daemon 时的降级路径（N-02.1）；daemon 在线时按 `report.cadence` 自动生成。
+    """
+    engine = _make_engine(repo)
+    if last:
+        items = engine.reports.list_reports(limit=1)
+        if not items:
+            console.print("[yellow]还没有报告，先跑一次 `skillos report` 生成基线[/yellow]")
+            raise typer.Exit(EXIT_USAGE)
+        data = engine.reports.get_report(items[0]["id"])
+        if data is None:   # 列表读到了、详情读不到 = DB 异常，不静默当"没有报告"
+            console.print("[red]✗ 报告详情读取失败[/red]")
+            raise typer.Exit(EXIT_FAIL)
+    else:
+        data = engine.reports.generate()
+
+    period = data.get("period") or {}
+    console.print(
+        f"[bold]体检报告[/bold] {period.get('start', '?')} → {period.get('end', '?')}"
+    )
+    if data.get("unchanged"):
+        console.print("[green]无变化[/green]（N-02.6：无变化也留痕，周期连续可查）")
+
+    drift = data.get("drift") or {}
+    console.print("\n[bold]① 漂移增量[/bold]（MODIFIED / CONFLICT / MISSING）")
+    for state, counts in (drift.get("counts") or {}).items():
+        console.print(
+            f"  {state:<9} {counts.get('now', 0):>3} 项"
+            f"（较上期 {counts.get('delta', 0):+d}）"
+        )
+    for item in drift.get("new") or []:
+        console.print(
+            f"    [yellow]+ {item.get('state')} {item.get('slug')}"
+            f" @ {item.get('runtime_key')}[/yellow]"
+        )
+
+    gate = data.get("gate") or {}
+    console.print(f"\n[bold]② 门禁 error 新增[/bold] {gate.get('new_count', 0)} 项")
+    for item in gate.get("new") or []:
+        console.print(f"    [red]+ {item.get('slug')} · {item.get('rule')}[/red]")
+
+    decay = data.get("decay") or {}
+    console.print(f"\n[bold]③ 折旧 ok→degraded[/bold] {decay.get('count', 0)} 项")
+    for slug in decay.get("newly_degraded") or []:
+        console.print(f"    [yellow]+ {slug}[/yellow]")
+
+    health = data.get("health") or {}
+    console.print(f"\n[bold]④ 健康度降幅 Top5[/bold]（均值 {health.get('avg')}）")
+    for item in health.get("drops") or []:
+        console.print(
+            f"    {item.get('slug')}: {item.get('from')} → {item.get('to')}"
+            f"（{item.get('delta'):+d}）"
+        )
+    raise typer.Exit(EXIT_OK)
 
 
 # ---------------------------------------------------------------- 遥测（N-11.4 / N-11.9）

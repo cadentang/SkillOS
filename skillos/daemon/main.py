@@ -6,6 +6,8 @@
   写操作持全局写锁（FR-1.2.4）、request_id 近窗口 LRU 去重（07 N12 守卫②③）
 - 心跳保活 + 断线指数退避重连（1s,2s,4s,…,60s 上限，FR-1.2.5）
 - 连接建立后上报一次漂移矩阵；push 后与周期性再报（FR-1.2.6）
+- 用量上报（N-01.4/9）：连上即补报近 30 天聚合行、每日聚合后再报一次；
+  开关 `usage_report_enabled` 关闭时**一条都不发**（零上报可断言）
 
 启动顺序：环境校验（WSL 边界 / 云同步目录）→ 连接 → 注册 → 循环。
 """
@@ -21,7 +23,7 @@ import sys
 import threading
 import time
 from collections import OrderedDict
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 import websockets
@@ -149,11 +151,151 @@ class TaskExecutor:
 
     def _dispatch(self, op: str, params: dict) -> dict:
         engine = self.engine
+        if op == "usage_report":
+            # N-01.4/5：只回聚合行；开关关闭时**拒绝**（云端据此断言零上报）
+            if not engine.settings.report_enabled():
+                return {"ok": False, "error": {
+                    "code": "REPORT_DISABLED",
+                    "message": "设备侧未开启 usage_report_enabled（默认 off，N-01.5）",
+                }}
+            return {"ok": True, "data": {"rows": engine.usage.report_rows()}}
         if op == "usage_aggregate":
             # 5.2：只接受 params.truncated（不接任意参数/SQL）；重算在前、清理在后
             rows = engine.usage.aggregate()
             purged = engine.usage.purge()
             return {"ok": True, "data": {"rows": rows, "purged": purged}}
+        if op == "settings_get":
+            # V2-T1：全部登记键一次性返回（键集来自 settings_service.DEFAULTS，不猜）
+            from skillos.services.settings_service import DEFAULTS
+
+            return {"ok": True, "data": {
+                "items": {key: engine.settings.get(key) for key in DEFAULTS},
+            }}
+        if op == "settings_put":
+            # 批量写显式值（T13 精神）：先全量校验键名再写，避免半批生效
+            items = params.get("items")
+            if not isinstance(items, dict) or not items:
+                return {"ok": False, "error": {
+                    "code": "INVALID_INPUT",
+                    "message": "settings_put 需要 items（{key: value}，显式值）",
+                }}
+            from skillos.services.settings_service import DEFAULTS
+
+            unknown = sorted(k for k in items if k not in DEFAULTS)
+            if unknown:
+                return {"ok": False, "error": {
+                    "code": "INVALID_INPUT",
+                    "message": f"未登记的开关键: {unknown}（先更新 docs/12 §3）",
+                }}
+            for key, value in items.items():
+                engine.settings.set(key, value)
+            return {"ok": True, "data": {
+                "items": {key: engine.settings.get(key) for key in items},
+            }}
+        if op == "usage_summary":
+            days, bad = _int_param(params, "days", 30, lo=1, hi=180)
+            if bad:
+                return bad
+            slugs = engine.all_slugs()
+            return {"ok": True, "data": {
+                "days": days,
+                "total_skills": len(slugs),
+                # N-01.8：两个榜单都按 30 天窗口（days 只影响这两个）
+                "top": engine.usage.top_called(slugs=slugs, days=days, limit=10),
+                "zero_called": engine.usage.zero_called(slugs=slugs, days=days),
+                # N-01.7：口径单点 = usage_service.zombie_slugs（双条件）
+                "zombie": engine.usage.zombie_slugs(
+                    slugs=slugs, degraded=engine.degraded_slugs(),
+                ),
+                "zombie_basis": "实测（90 天零调用）+ 折旧（staleness=degraded）",
+            }}
+        if op == "usage_events":
+            slug = str(params.get("slug") or "")
+            if not slug:
+                return {"ok": False, "error": {
+                    "code": "INVALID_INPUT", "message": "usage_events 需要 slug",
+                }}
+            limit, bad = _int_param(params, "limit", 100, lo=1, hi=500)
+            if bad:
+                return bad
+            return {"ok": True, "data": {
+                "slug": slug,
+                "events": engine.usage.events_for(slug, limit=limit),
+                "sessions": engine.usage.session_chains(slug, limit=limit),
+            }}
+        if op == "report_list":
+            limit, bad = _int_param(params, "limit", 20, lo=1, hi=100)
+            if bad:
+                return bad
+            return {"ok": True, "data": {"items": engine.reports.list_reports(limit=limit)}}
+        if op == "report_get":
+            report_id = str(params.get("id") or "")
+            report = engine.reports.get_report(report_id) if report_id else None
+            if report is None:
+                return {"ok": False, "error": {
+                    "code": "NOT_FOUND", "message": f"报告不存在: {report_id}",
+                }}
+            return {"ok": True, "data": report}
+        if op == "rules_list":
+            # N-03/N-08 规则面板：生效规则 + 无效规则（含原因）+ 白名单 + ruleset_hash
+            return {"ok": True, "data": engine.rules.panel_dict()}
+        if op == "similarity_list":
+            # E-04.3：只给分数与建议读数，不做任何变更（N-07.2 用户永远可改）
+            # N-07.5：已弃用清单带 skill_id —— 前端"恢复"直接调既有 push 路由，
+            # 不新增一个只为转发的端点（恢复 = 重新分发）
+            deprecated = [
+                {"slug": r.slug, "id": r.id}
+                for r in engine.db.list_skills(_all_query()) if r.deprecated
+            ]
+            return {"ok": True, "data": {
+                "items": engine.similarity.list_pairs(),
+                "deprecated": deprecated,
+            }}
+        if op == "skill_deprecate":
+            # N-07.3 回收落选方：dry_run 先列 removals（runtime_key:path），确认后执行
+            if not engine:
+                return {"ok": False, "error": {
+                    "code": "NOT_INITIALIZED", "message": "引擎未初始化",
+                }}
+            slug = str(params.get("slug") or "")
+            if not slug:
+                return {"ok": False, "error": {"code": "INVALID_INPUT", "message": "缺少 slug"}}
+            raw = params.get("confirm_removals") or []
+            if not isinstance(raw, list):
+                return {"ok": False, "error": {
+                    "code": "INVALID_INPUT", "message": "confirm_removals 必须是字符串数组",
+                }}
+            try:
+                data = engine.deprecate_skill(
+                    slug,
+                    dry_run=bool(params.get("dry_run", True)),
+                    confirmed_removals=[str(p) for p in raw],
+                )
+            except SkillValidationError as e:
+                return {"ok": False, "error": {"code": e.code, "message": e.message}}
+            if not data.get("ok"):
+                return {"ok": False, "error": {
+                    "code": str(data.get("error_code") or "DEPRECATE_FAILED"),
+                    "message": str(data.get("detail") or ""),
+                    "removals": data.get("removals") or [],
+                }}
+            return {"ok": True, "data": data}
+        if op == "similarity_run":
+            # TQ-03：详情页「立即比对」手动触发；覆盖式落库 ⇒ 重复点不新增行
+            run = engine.similarity.run()
+            return {"ok": True, "data": {
+                "pairs": run.pairs, "added": run.added, "skills": run.skills,
+                "threshold": run.threshold,
+            }}
+        if op == "upstream_check":
+            # E-08.1：手动「立即检查」（单 skill）或全量。网络 IO 不在任何锁内（T17）
+            from skillos.services.upstream_service import UpstreamService
+
+            service = UpstreamService(engine.db, engine.git)
+            slug = str(params.get("slug") or "")
+            if slug:
+                return {"ok": True, "data": service.check(slug).to_dict()}
+            return {"ok": True, "data": service.check_all()}
         if op == "scan":
             items = [
                 {
@@ -275,6 +417,9 @@ class TaskExecutor:
                     str(params.get("slug") or ""),
                     name=str(params.get("name") or ""),
                     description=str(params.get("description") or ""),
+                    # E-07.1/2：category 进 frontmatter，template ∈ 内置三模板
+                    category=str(params.get("category") or ""),
+                    template=str(params.get("template") or "minimal"),
                     author=str(params.get("author") or "web <web@skillos.local>"),
                 )
             except SkillValidationError as e:
@@ -469,18 +614,40 @@ class TaskExecutor:
         return {"ok": True, "data": result}
 
     def _check(self, params: dict) -> dict:
-        """逐条门禁 findings（FR-1.0.11 / NFR-10.5：与 push 共用同一判定入口）。"""
+        """逐条门禁 findings（FR-1.0.11 / NFR-10.5：与 push 共用同一判定入口）。
+
+        M3 起包含自定义规则（N-03）与安全规则（N-08），结果落库并带 `ruleset_hash`；
+        检查尾部触发一次相似重算（E-04.2 / TQ-03：独立于 check 性能基准，
+        失败只记日志 —— 相似提示坏了不该影响检查结论）。
+        """
         slug = str(params.get("slug") or "")
+        security_only = bool(params.get("security_only", False))
+        # `include_untracked` 默认 True（显式 check 要扫大文件，N-08.3）；
+        # CR 合并前置传 False —— 与 push 前置同一口径（E-03.4 / E-05.2），
+        # 不为了一次合并多读一遍超阈值资产。
+        include_untracked = bool(params.get("include_untracked", True))
         try:
-            result = self.engine.gate_of(slug)
+            report = self.engine.checks.check(
+                slug, security_only=security_only, include_untracked=include_untracked,
+            )
         except Exception as e:  # noqa: BLE001 —— canonical 缺失等场景转 INVALID_INPUT
             return {"ok": False, "error": {"code": "INVALID_INPUT", "message": str(e)}}
+
+        try:
+            self.engine.run_similarity()
+        except Exception:  # noqa: BLE001 —— 相似重算是旁路能力
+            log.warning("similarity_refresh_failed", skill_slug=slug)
+
         return {"ok": True, "data": {
-            "has_error": result.has_error,
+            "has_error": report.gate.has_error,
+            "ruleset_hash": report.bundle.ruleset_hash,
             "findings": [
                 {"rule": f.rule, "level": str(f.level), "message": f.message}
-                for f in result.findings
+                for f in report.gate.findings
             ],
+            "invalid_rules": report.bundle.invalid,
+            "ignored": report.bundle.ignored,
+            "decay": report.decay.to_dict(),
         }}
 
     def _logs(self, params: dict) -> dict:
@@ -601,6 +768,42 @@ def drift_payload(engine: LocalEngine, fresh: bool = True) -> list[dict]:
     （fresh=True）——顺带把缓存换成最新的，status 任务随后秒回。
     """
     return _matrix_payload(engine, fresh=fresh)
+
+
+def _int_param(params: dict, key: str, default: int, *,
+               lo: int, hi: int) -> tuple[int, dict | None]:
+    """取整数参数并夹紧到 `[lo, hi]`；不是整数就报 INVALID_INPUT（不猜、不兜底）。"""
+    raw = params.get(key, default)
+    if raw is None:
+        raw = default
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return default, {"ok": False, "error": {
+            "code": "INVALID_INPUT", "message": f"{key} 必须是整数",
+        }}
+    return max(lo, min(raw, hi)), None
+
+
+def _seconds_since(at: datetime) -> float:
+    """距今秒数；列在 SQLite 里读回是 naive（存的时候丢了 tz），这里两种都认。"""
+    now = datetime.now(UTC) if at.tzinfo else datetime.now(UTC).replace(tzinfo=None)
+    return (now - at).total_seconds()
+
+
+async def push_usage_report(ws, engine: LocalEngine) -> int:
+    """主动上行一次用量聚合行（N-01.4 每日 / N-01.9 重连补报）。
+
+    返回发送行数：**0 表示没发**（`usage_report_enabled=false` 时
+    `report_rows()` 就是空列表）—— 于是"零上报"在协议层可被证明，
+    而不是靠"没人调用"。报文只有聚合值，无事件、无参数摘要、无路径。
+    """
+    rows = await asyncio.to_thread(engine.usage.report_rows)
+    if not rows:
+        return 0
+    await ws.send(json.dumps({
+        "type": "event", "event": "usage_report",
+        "payload": {"rows": rows},
+    }))
+    return len(rows)
 
 
 def check_environment(home: Path) -> list[str]:
@@ -758,6 +961,15 @@ async def run(cloud_url: str, pair_code: str | None = None,
                     "payload": {"matrix": payload},
                 }))
 
+                # N-01.9 断连补报：连上即报近 30 天全量，云端覆盖合并 ⇒ 重发不翻倍。
+                # 开关关闭时 push_usage_report 直接返回 0、不发送（零上报）。
+                try:
+                    sent = await push_usage_report(ws, engine)
+                    if sent:
+                        log.info("usage_report_sent", rows=sent, trigger="reconnect")
+                except Exception:  # noqa: BLE001 —— 补报失败不影响连接主循环
+                    log.warning("usage_report_send_failed", trigger="reconnect")
+
                 async def heartbeat() -> None:  # noqa: B023 —— ws 由外层 with 管理生命周期
                     while True:
                         await asyncio.sleep(HEARTBEAT_S)
@@ -774,10 +986,12 @@ async def run(cloud_url: str, pair_code: str | None = None,
                             "payload": {"matrix": p},
                         }))
 
-                async def usage_tick() -> None:
-                    """5.2：每日 00:10（本地时）重算聚合并清理 30 天前事件。
+                async def usage_tick() -> None:  # noqa: B023 —— ws 由外层 with 管理生命周期
+                    """5.2：每日 00:10（本地时）重算聚合并清理 30 天前事件；
+                    聚合成功后**顺手上报**一次（N-01.4 每日上报）。
 
-                    每分钟醒一次、当天只跑一次；落库走 to_thread，不占事件循环。
+                    每分钟醒一次、当天只跑一次；落库与上报都走异步/线程，不占事件循环。
+                    上报失败只记日志 —— 明天全量重报覆盖（N-01.9），不丢不重。
                     """
                     last_run_day = None
                     while True:
@@ -791,17 +1005,106 @@ async def run(cloud_url: str, pair_code: str | None = None,
                                 last_run_day = now.date()
                             except Exception:  # noqa: BLE001 —— 维护任务失败不拖垮连接
                                 log.exception("usage_aggregate_failed")
+                            try:
+                                sent = await push_usage_report(ws, engine)
+                                if sent:
+                                    log.info("usage_report_sent", rows=sent,
+                                             trigger="daily")
+                            except Exception:  # noqa: BLE001 —— 上报失败次日补
+                                log.warning("usage_report_send_failed", trigger="daily")
                         await asyncio.sleep(60)
+
+                async def report_tick() -> None:
+                    """N-02.1：按 `report.cadence`（daily/weekly，默认 weekly）生成体检报告。
+
+                    计算只读、不持写锁（N-02.5 / T17）；生成失败只记日志，
+                    下一轮到期判定会重试（基线取上一份报告，不会因失败丢数据）。
+                    首启无历史报告时先生成一份基线，否则"周报"要等到装完一周才有。
+                    """
+                    cadence_s = {"daily": 86_400, "weekly": 7 * 86_400}
+                    while True:
+                        await asyncio.sleep(600)
+                        try:
+                            cadence = str(engine.settings.get("report.cadence") or "weekly")
+                            span = cadence_s.get(cadence)
+                            if span is None:
+                                log.warning("report_cadence_unknown", cadence=cadence)
+                                span = cadence_s["weekly"]
+                            last = await asyncio.to_thread(
+                                engine.db.list_health_reports, 1
+                            )
+                            due = not last or _seconds_since(last[0].period_end) >= span
+                            if due:
+                                report = await asyncio.to_thread(engine.reports.generate)
+                                log.info(
+                                    "report_generated",
+                                    report_id=report.get("id"),
+                                    unchanged=report.get("unchanged"),
+                                    cadence=cadence,
+                                )
+                        except Exception:  # noqa: BLE001 —— 报告失败不拖垮连接
+                            log.exception("report_generate_failed")
+
+                async def upstream_tick() -> None:
+                    """E-08.1：上游检查每日一次（本地时 03:00 后首个 tick）。
+
+                    受 settings `upstream.check_enabled` 控制（默认开）；关掉即完全不跑，
+                    纯 CLI 单机没有 daemon ⇒ 只能手动检查（E-08.1 的两种形态）。
+                    检查本身是网络 IO，放线程池，不占事件循环（T17）。
+                    """
+                    last_run_day = None
+                    while True:
+                        await asyncio.sleep(300)
+                        try:
+                            enabled = bool(engine.settings.get("upstream.check_enabled"))
+                        except Exception:  # noqa: BLE001 —— 设置读失败当作关闭
+                            enabled = False
+                        now = datetime.now().astimezone()
+                        if not enabled or now.hour < 3 or last_run_day == now.date():
+                            continue
+                        try:
+                            result = await asyncio.to_thread(
+                                executor.execute, "upstream_check", {},
+                            )
+                            last_run_day = now.date()
+                            data = result.get("data") or {}
+                            log.info(
+                                "upstream_daily_check",
+                                checked=data.get("checked"),
+                                summary=data.get("summary"),
+                            )
+                        except Exception:  # noqa: BLE001 —— 下次 tick 重试
+                            log.exception("upstream_daily_check_failed")
 
                 hb = asyncio.create_task(heartbeat())
                 rep = asyncio.create_task(periodic_report())
                 agg = asyncio.create_task(usage_tick())
+                rpt = asyncio.create_task(report_tick())
+                upt = asyncio.create_task(upstream_tick())
                 try:
                     while True:
                         raw = await ws.recv()
                         msg = json.loads(raw)
                         mtype = msg.get("type")
                         if mtype == "pong":
+                            continue
+                        if mtype == "event_ack":
+                            # 上线事件的回执（N-01.4）：merged/skipped 落日志，
+                            # 让"报上去了"有证据，而不是只知道"发出去了"
+                            _err = (msg.get("error") or {}).get("code")
+                            if msg.get("ok"):
+                                log.info(
+                                    "usage_report_acked",
+                                    event=msg.get("event"),
+                                    merged=msg.get("merged"),
+                                    skipped=msg.get("skipped"),
+                                )
+                            else:
+                                log.warning(
+                                    "usage_report_rejected",
+                                    event=msg.get("event"),
+                                    error_code=_err,
+                                )
                             continue
                         if mtype == "task":
                             request_id = msg.get("request_id")
@@ -876,6 +1179,8 @@ async def run(cloud_url: str, pair_code: str | None = None,
                     hb.cancel()
                     rep.cancel()
                     agg.cancel()
+                    rpt.cancel()
+                    upt.cancel()
                     reset_op_context()
                     log.info(
                         "ws_disconnected",
