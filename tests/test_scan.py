@@ -58,6 +58,19 @@ class TestSkillDetection:
         skills = scan_root(root, _spec(root), frozenset())
         assert [s.rel_path for s in skills] == ["research/real-skill"]
 
+    def test_root_marker_does_not_short_circuit(self, root: Path) -> None:
+        """扫描根上被误放 SKILL.md 时，整端真 Skill 仍须被扫到。
+
+        实测事故：`~/.claude/skills/SKILL.md`（一个没放进自己目录的 skill）让
+        claude 端 42 个 Skill 集体消失 —— 根被视为包根后触发"包根之下不再寻找
+        其它包根"。扫描根是容器目录，没有"自己是一个 Skill"的语义。
+        """
+        (root / "SKILL.md").write_bytes(b"---\nname: stray\n---\n")
+        _make_skill(root, "alpha")
+        _make_skill(root, "beta")
+        skills = scan_root(root, _spec(root), frozenset())
+        assert [s.rel_path for s in skills] == ["alpha", "beta"]
+
     def test_nested_subskills(self, root: Path) -> None:
         """FR-1.0.3：subskills/<name>/SKILL.md 计入清单且 is_nested=True。"""
         outer = _make_skill(root, "outer")

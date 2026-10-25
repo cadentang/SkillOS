@@ -28,6 +28,7 @@ from pathlib import Path
 
 import websockets
 from filelock import FileLock, Timeout
+from websockets.exceptions import InvalidMessage, InvalidStatus
 
 from skillos.core.constants import LOCK_TIMEOUT_S, WS_BACKOFF_MAX_S, WS_TASK_OPS
 from skillos.core.logging import (
@@ -51,6 +52,14 @@ log = get_logger("skillos.daemon")
 HEARTBEAT_S = 20
 REPORT_INTERVAL_S = 60
 _REQ_LRU_SIZE = 512
+
+# 可重试的连接异常。握手期的 InvalidMessage / InvalidStatus 必须在内 ——
+# 云端重启窗口里 `websockets.connect` 会抛它们（"did not receive a valid HTTP
+# response"），不兜住就整个进程退出：实测 2026-10-25 两次 daemon 死在断线后重连。
+# 刻意不含 InvalidURI：URL 拼错是配置错误，该当场报错而不是无限重试。
+_RETRY_ERRORS: tuple[type[BaseException], ...] = (
+    ConnectionRefusedError, OSError, TimeoutError, InvalidMessage, InvalidStatus,
+)
 
 
 def _parse_log_json(line: str) -> dict | None:
@@ -1201,11 +1210,7 @@ async def run(cloud_url: str, pair_code: str | None = None,
             )
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, WS_BACKOFF_MAX_S)
-        except (
-            ConnectionRefusedError,
-            OSError,
-            TimeoutError,
-        ) as e:
+        except _RETRY_ERRORS as e:
             log.warning(
                 "ws_reconnect",
                 reason=type(e).__name__,

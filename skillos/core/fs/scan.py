@@ -98,6 +98,12 @@ def scan_root(root: Path, spec: RootSpec, ignore: frozenset[str]) -> list[Scanne
         rel = cur.relative_to(root).as_posix()
         if rel != "." and is_excluded(rel):
             continue
+        # 扫描根是 Runtime 的**容器目录**，永不作为包根：根上若被误放一个 SKILL.md，
+        # 按包边界规则会命中"包根之下不再寻找其它包根"，整个 Runtime 被短路。
+        # 实测代价：`~/.claude/skills/SKILL.md` 让 claude 端 42 个真 Skill 集体消失
+        # （2026-10-25）。容器目录没有"自己是一个 Skill"的语义。
+        if rel == ".":
+            continue
         marker = _marker_of(cur)
         if marker is None:
             continue  # 不是包根：继续下钻（README 不短路，06 A2）

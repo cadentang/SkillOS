@@ -409,3 +409,30 @@ def _agent_token(client: TestClient, jwt: str) -> str:
     tid, plain, thash = new_agent_token()
     repo.issue_agent_token(user.id, "test-agent", tid, thash, platform="windows")
     return plain
+
+
+class TestDaemonRetryClassification:
+    """断线重连的异常分类（FR-1.2.x）。
+
+    2026-10-25 实测：云端重启窗口里 `websockets.connect` 抛 `InvalidMessage`
+    （did not receive a valid HTTP response），旧 except 列表只兜 ConnectionClosed /
+    OSError / TimeoutError ⇒ daemon 进程直接退出，日志停在 ws_reconnect 后再无下文。
+    把分类固定下来，别在改 except 列表时又漏掉握手异常。
+    """
+
+    def test_handshake_errors_are_retryable(self) -> None:
+        from websockets.exceptions import InvalidMessage, InvalidStatus
+
+        from skillos.daemon.main import _RETRY_ERRORS
+
+        for exc_type in (InvalidMessage, InvalidStatus, ConnectionRefusedError,
+                         TimeoutError, OSError):
+            assert issubclass(exc_type, _RETRY_ERRORS), exc_type
+
+    def test_bad_url_is_not_retried(self) -> None:
+        """URL 拼错是配置错误：该当场失败，不该靠无限重试掩盖。"""
+        from websockets.exceptions import InvalidURI
+
+        from skillos.daemon.main import _RETRY_ERRORS
+
+        assert not issubclass(InvalidURI, _RETRY_ERRORS)
