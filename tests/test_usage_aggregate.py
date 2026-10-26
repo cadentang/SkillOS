@@ -118,6 +118,32 @@ class TestAggregateService:
         svc.aggregate(now=now)
         assert _daily(store) == []
 
+    def test_replace_usage_daily_covers_conflicting_row(self) -> None:
+        """窗口没盖住的旧行不能被 INSERT 撞死 —— 必须按冲突键覆盖。
+
+        现实触发条件的复现：daemon 定时任务与 CLI 各自聚合同一个库，删除与写入之间
+        隔着一次 flush，另一个进程先插进去的同键行会让裸 INSERT 抛 IntegrityError，
+        一次撞车之后整个 Session 进入 rollback-only，后续全部读操作失败。
+        """
+        store = _store()
+        day = datetime(2026, 10, 24, 12, 0, tzinfo=UTC).date()
+        base = {
+            "device_id": "local", "skill_id": "demo", "date": day, "via": "mcp",
+            "count": 1, "tokens_in": 0, "tokens_out": 0, "by_op": '{"get_skill": 1}',
+        }
+        assert store.replace_usage_daily(day, [dict(base)]) == 1
+
+        # since 落在 row 的日期之后 → 删除清不掉旧行，写入必然撞上唯一约束
+        store.replace_usage_daily(
+            day + timedelta(days=1), [dict(base, count=2, tokens_in=7)]
+        )
+
+        rows = list(store._s.scalars(select(SkillUsageDaily)))
+        assert len(rows) == 1                    # 覆盖，不是并行一行也不是崩掉
+        assert rows[0].count == 2                # 取本次重算值（重算覆盖，不累加）
+        assert rows[0].tokens_in == 7
+        assert rows[0].created_at is not None    # Core insert 必须显式带 created_at
+
     def test_purge_drops_only_expired_events(self) -> None:
         store = _store()
         now = datetime(2026, 10, 24, 12, 0, tzinfo=UTC)

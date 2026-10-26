@@ -12,6 +12,8 @@ import secrets
 from datetime import UTC, date, datetime, timedelta
 
 from sqlalchemy import delete, distinct, func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from skillos.core.constants import DRIFT_SEVERITY
@@ -298,31 +300,40 @@ class CloudRepo:
         `device_id` 必须是云端盖章的 token_id（每设备唯一），不采信设备自报值。
         N-01.9 的断连补偿靠「设备每次全量重报 30 天 + 服务端覆盖合并」实现 ——
         累加式 upsert 会让同一份数据重发一次就翻倍，那不是补偿而是污染。
+
+        用 冲突即覆盖 的 upsert 而不是「先查后写」：多台设备/断连补报会并发上报，
+        查到「不存在」到真正 INSERT 之间另一路可能已经落地同键行 —— 那时裸 INSERT
+        抛 IntegrityError，整个 Session 进入 rollback-only，后续读全部失败
+        （2026-10-26 在本地 index_repo 上实测到同一形态）。
         """
+        insert_fn = pg_insert if self.s.bind.dialect.name == "postgresql" else sqlite_insert
         merged = 0
         for row in rows:
             day = row["date"]
             if isinstance(day, str):
                 day = date.fromisoformat(day)
-            existing = self.s.scalar(select(models.SkillUsageDaily).where(
-                models.SkillUsageDaily.device_id == row["device_id"],
-                models.SkillUsageDaily.skill_id == row["skill_id"],
-                models.SkillUsageDaily.date == day,
-                models.SkillUsageDaily.via == row["via"],
+            values = {
+                "device_id": row["device_id"],
+                "skill_id": row["skill_id"],
+                "date": day,
+                "via": row["via"],
+                "count": int(row.get("count") or 0),
+                "tokens_in": int(row.get("tokens_in") or 0),
+                "tokens_out": int(row.get("tokens_out") or 0),
+                "duration_ms_p50": row.get("duration_ms_p50"),
+                "duration_ms_p95": row.get("duration_ms_p95"),
+                "by_op": row.get("by_op"),
+            }
+            stmt = insert_fn(models.SkillUsageDaily).values(
+                # Core insert 不吃 model 上的 Python 侧 default，NOT NULL 列要显式给
+                id=f"ud_{secrets.token_hex(8)}",
+                created_at=_now(),
+                **values,
+            )
+            self.s.execute(stmt.on_conflict_do_update(
+                index_elements=["device_id", "skill_id", "date", "via"],
+                set_=values,
             ))
-            if existing is None:
-                existing = models.SkillUsageDaily(
-                    id=f"ud_{secrets.token_hex(8)}",
-                    device_id=row["device_id"], skill_id=row["skill_id"],
-                    date=day, via=row["via"],
-                )
-                self.s.add(existing)
-            existing.count = int(row.get("count") or 0)
-            existing.tokens_in = int(row.get("tokens_in") or 0)
-            existing.tokens_out = int(row.get("tokens_out") or 0)
-            existing.duration_ms_p50 = row.get("duration_ms_p50")
-            existing.duration_ms_p95 = row.get("duration_ms_p95")
-            existing.by_op = row.get("by_op")
             merged += 1
         self.s.commit()
         return merged

@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Protocol
 
 from sqlalchemy import delete, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, aliased
 
 from skillos.store.models import (
@@ -366,12 +368,36 @@ class SqliteIndexStore:
     def replace_usage_daily(self, since: date, rows: list[dict]) -> int:
         """重算窗口内整体覆盖（TQ-02 幂等口径）：先删该区间，再写新行。
 
-        不用「累加 upsert」：聚合是**从事件表重算**，同一批事件跑两次必须得出同一结果。
+        不用「累加 upsert」：聚合是**从事件表重算**，同一批事件跑两次必须得出同一结果
+        （这里 DO UPDATE 覆盖的是同键取值，不是累加计数）。
+
+        写入必须是 冲突即覆盖 的 upsert，不能裸 INSERT：删除与插入之间隔着一次
+        flush，而 daemon 的定时任务和 CLI 会各自聚合同一个库 —— 谁后插进去誰就撞
+        `(device_id, skill_id, date, via)` 唯一约束。撞一次 IntegrityError 整个
+        Session 就进入 rollback-only，**之后所有读都报「事务已被回滚」**（2026-10-26
+        实测：28 行日聚合引发连锁读取失败）。
         """
         self._s.execute(delete(SkillUsageDaily).where(SkillUsageDaily.date >= since))
+        try:
+            self._upsert_usage_daily(rows)
+            self._s.commit()
+        except Exception:  # noqa: BLE001 —— 见下方「Session 毒化」
+            self._s.rollback()
+            raise
+        return len(rows)
+
+    def _upsert_usage_daily(self, rows: list[dict]) -> None:
+        """按冲突键覆盖写日聚合行（SQLite / PG 双方言）。
+
+        语义保留「重算覆盖」而非累加：count/tokens/p50 一律取本次重算值。
+        """
+        insert_fn = pg_insert if self._s.bind.dialect.name == "postgresql" else sqlite_insert
         for row in rows:
-            self._s.add(SkillUsageDaily(
+            stmt = insert_fn(SkillUsageDaily).values(
                 id=_ulid(),
+                # Core insert 不吃 model 上的 Python 侧 default（那是 ORM 层行为），
+                # NOT NULL 列必须显式给值
+                created_at=_now(),
                 device_id=row["device_id"],
                 skill_id=row["skill_id"],
                 date=row["date"],
@@ -382,9 +408,18 @@ class SqliteIndexStore:
                 duration_ms_p50=row.get("duration_ms_p50"),
                 duration_ms_p95=row.get("duration_ms_p95"),
                 by_op=row.get("by_op"),
+            )
+            self._s.execute(stmt.on_conflict_do_update(
+                index_elements=["device_id", "skill_id", "date", "via"],
+                set_={
+                    "count": row["count"],
+                    "tokens_in": row.get("tokens_in", 0),
+                    "tokens_out": row.get("tokens_out", 0),
+                    "duration_ms_p50": row.get("duration_ms_p50"),
+                    "duration_ms_p95": row.get("duration_ms_p95"),
+                    "by_op": row.get("by_op"),
+                },
             ))
-        self._s.commit()
-        return len(rows)
 
     def list_usage_daily(self, since: date) -> list[SkillUsageDaily]:
         return list(self._s.scalars(
