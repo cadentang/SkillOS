@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Skill OS">
+  <!-- 与侧栏 brand 同一枚图形：三层叠菱形（Skill 分层），底色取设计令牌 --primary(#4F5FE8) -->
+  <rect width="32" height="32" rx="7" fill="#4F5FE8"/>
+  <g transform="translate(6.4 6.4) scale(1.2)">
+    <path d="M8 1.5L14 4.8L8 8.1L2 4.8L8 1.5Z" fill="#fff"/>
+    <path d="M2 8L8 11.3L14 8" fill="none" stroke="#fff" stroke-width="1.5"
+          stroke-linecap="round" stroke-linejoin="round" opacity=".65"/>
+    <path d="M2 11.2L8 14.5L14 11.2" fill="none" stroke="#fff" stroke-width="1.5"
+          stroke-linecap="round" stroke-linejoin="round" opacity=".35"/>
+  </g>
+</svg>

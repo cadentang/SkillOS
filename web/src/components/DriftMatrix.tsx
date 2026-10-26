@@ -2,9 +2,13 @@ import { Link } from "react-router-dom";
 import type { DriftRow } from "../api/endpoints";
 import { StateCell, stateLabel } from "./StateChip";
 
-/** 四端漂移矩阵（FR-2.1.2）：行 = Skill（聚合态 FR-2.1.9），列 = Runtime，格 = 状态。
+/** 多端漂移矩阵（FR-2.1.2）：行 = Skill（聚合态 FR-2.1.9），列 = Runtime，格 = 状态。
+ *  列集合含自定义端（`custom:*`），端数不固定，所以文案与布局都不写死"四端"。
  *  两类徽标（FR-1.0.19/20）：●模板已升级 / ▲含未纳管资产（live 数据才有，缓存视图无）。
- *  行勾选供 BatchActionBar 一键分发（FR-2.1.4）。 */
+ *  行勾选供 BatchActionBar 一键分发（FR-2.1.4）。
+ *
+ *  分页由调用方做（Dashboard 切片后传入 `rows`）；`columns` 也必须由调用方按
+ *  **全部筛选结果**传入 —— 只按当前页推列会让各页列集合抖动，表格对不齐。 */
 
 const RUNTIME_ORDER = ["claude", "agents", "workbuddy", "codex"];
 
@@ -18,19 +22,22 @@ export function runtimeColumns(rows: DriftRow[]): string[] {
 
 export default function DriftMatrix({
   rows,
+  columns: columnsProp,
   selected,
   onToggle,
   onToggleAll,
   onResolveConflict,
 }: {
   rows: DriftRow[];
+  /** 列（Runtime）集合；省略时按传入的 rows 推断（不分页的旧调用点）。 */
+  columns?: string[];
   selected: Set<string>;
   onToggle: (slug: string) => void;
   onToggleAll: (checked: boolean) => void;
   /** 单元格为可选：CONFLICT 态的 (slug, runtime_key) 点击回调（P3）。*/
   onResolveConflict?: (slug: string, runtimeKey: string) => void;
 }) {
-  const columns = runtimeColumns(rows);
+  const columns = columnsProp ?? runtimeColumns(rows);
   if (rows.length === 0) {
     return (
       <p className="py-lg text-center" style={{ color: "var(--text-secondary)" }}>
@@ -47,8 +54,8 @@ export default function DriftMatrix({
             <th className="w-10 py-sm pr-xs text-left">
               <input
                 type="checkbox"
-                aria-label="全选"
-                checked={selected.size === rows.length && rows.length > 0}
+                aria-label="全选本页"
+                checked={rows.length > 0 && rows.every((r) => selected.has(r.slug))}
                 onChange={(e) => onToggleAll(e.target.checked)}
               />
             </th>

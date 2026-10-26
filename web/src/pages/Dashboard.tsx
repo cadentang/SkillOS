@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   endpoints,
@@ -9,7 +9,7 @@ import {
 import { ApiError } from "../api/client";
 import ConflictResolveDialog from "../components/ConflictResolveDialog";
 import CreateSkillDialog from "../components/CreateSkillDialog";
-import DriftMatrix from "../components/DriftMatrix";
+import DriftMatrix, { runtimeColumns } from "../components/DriftMatrix";
 import LogsPanel from "../components/LogsPanel";
 import RecentSync from "../components/RecentSync";
 import RemovalsConfirmDialog from "../components/RemovalsConfirmDialog";
@@ -36,6 +36,9 @@ interface PushItem {
   message?: string;
   removals: string[];
 }
+
+/** 矩阵每页行数。默认 20：一屏能看全，且 60+ Skill 的真实库不会拉出超长表格。 */
+const PAGE_SIZE_OPTIONS = [20, 50, 100];
 
 export default function Dashboard() {
   const daemon = useDaemonStatusCtx();
@@ -105,6 +108,21 @@ export default function Dashboard() {
   const summary = drift.data?.summary ?? {};
   const manager = drift.data?.manager;
 
+  // 分页：真实库 60+ Skill，一次性铺满整张矩阵既难扫也拖慢渲染。
+  // 列（Runtime）按**全部筛选结果**算，不按当前页 —— 否则每页列集合会随
+  // 该页 Skill 有没有某端而抖动，表格对不齐。
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(PAGE_SIZE_OPTIONS[0]);
+  const columns = useMemo(() => runtimeColumns(filteredRows), [filteredRows]);
+  const pageCount = Math.max(1, Math.ceil(filteredRows.length / pageSize));
+  const currentPage = Math.min(page, pageCount);
+  const pagedRows = useMemo(
+    () => filteredRows.slice((currentPage - 1) * pageSize, currentPage * pageSize),
+    [filteredRows, currentPage, pageSize],
+  );
+  // 筛选条件变化 → 回到第一页（否则会停在一个已不存在的页码上）
+  useEffect(() => setPage(1), [search]);
+
   const toggle = (slug: string) =>
     setSelected((prev) => {
       const next = new Set(prev);
@@ -112,8 +130,16 @@ export default function Dashboard() {
       else next.add(slug);
       return next;
     });
+  /** 表头勾选框的语义是「本页全选」—— 分页后跨页全选没有可见反馈，容易误分发。 */
   const toggleAll = (checked: boolean) =>
-    setSelected(checked ? new Set(filteredRows.map((r) => r.slug)) : new Set());
+    setSelected((prev) => {
+      const next = new Set(prev);
+      for (const r of pagedRows) {
+        if (checked) next.add(r.slug);
+        else next.delete(r.slug);
+      }
+      return next;
+    });
 
   const pushMutation = useMutation({
     mutationFn: ({
@@ -415,13 +441,13 @@ export default function Dashboard() {
           <div className="flex items-center justify-between p-md">
             <div>
               <div className="font-semibold" style={{ fontSize: "var(--font-h2)" }}>
-                四端漂移矩阵
+                多端漂移矩阵
               </div>
               <div
                 className="mt-xs text-[var(--font-caption)]"
                 style={{ color: "var(--text-tertiary)" }}
               >
-                行 = Skill · 列 = Runtime · 格 = 漂移状态
+                行 = Skill · 列 = Runtime（含自定义端）· 格 = 漂移状态
               </div>
             </div>
             <div className="flex items-center gap-md">
@@ -433,13 +459,68 @@ export default function Dashboard() {
           <div className="h-px w-full" style={{ background: "var(--divider)" }} />
           <div className="px-md py-md">
             <DriftMatrix
-              rows={filteredRows}
+              rows={pagedRows}
+              columns={columns}
               selected={selected}
               onToggle={toggle}
               onToggleAll={toggleAll}
               onResolveConflict={(slug, runtimeKey) => setResolveTarget({ slug, runtimeKey })}
             />
           </div>
+          {filteredRows.length > 0 && (
+            <div
+              className="flex flex-wrap items-center justify-between gap-sm px-md py-sm"
+              style={{ borderTop: "1px solid var(--divider)" }}
+            >
+              <span
+                className="text-[var(--font-caption)]"
+                style={{ color: "var(--text-tertiary)" }}
+              >
+                共 {filteredRows.length} 个 Skill · 第 {currentPage}/{pageCount} 页
+                {selected.size > 0 ? ` · 已选 ${selected.size}` : ""}
+              </span>
+              <div className="flex items-center gap-sm">
+                <select
+                  aria-label="每页条数"
+                  value={pageSize}
+                  onChange={(e) => {
+                    setPageSize(Number(e.target.value));
+                    setPage(1);
+                  }}
+                  className="h-7 rounded-[var(--radius-control)] border px-xs text-[var(--font-caption)]"
+                  style={{
+                    borderColor: "var(--border)",
+                    background: "var(--surface-alt)",
+                    color: "var(--text-primary)",
+                  }}
+                >
+                  {PAGE_SIZE_OPTIONS.map((n) => (
+                    <option key={n} value={n}>
+                      每页 {n}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  disabled={currentPage <= 1}
+                  onClick={() => setPage(currentPage - 1)}
+                  className="h-7 rounded-[var(--radius-control)] border px-sm text-[var(--font-caption)] disabled:opacity-40"
+                  style={{ borderColor: "var(--border)", color: "var(--text-secondary)" }}
+                >
+                  上一页
+                </button>
+                <button
+                  type="button"
+                  disabled={currentPage >= pageCount}
+                  onClick={() => setPage(currentPage + 1)}
+                  className="h-7 rounded-[var(--radius-control)] border px-sm text-[var(--font-caption)] disabled:opacity-40"
+                  style={{ borderColor: "var(--border)", color: "var(--text-secondary)" }}
+                >
+                  下一页
+                </button>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* 最近同步记录 card */}
