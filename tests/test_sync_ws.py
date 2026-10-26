@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import pytest
@@ -409,6 +410,36 @@ def _agent_token(client: TestClient, jwt: str) -> str:
     tid, plain, thash = new_agent_token()
     repo.issue_agent_token(user.id, "test-agent", tid, thash, platform="windows")
     return plain
+
+
+class TestAgentIdleTimeout:
+    """半开连接必须由服务端摘掉（2026-10-26 实测：/api/logs 502 TIMEOUT）。
+
+    daemon 被强杀后 TCP 半开，`_recv_json(ws, timeout=None)` 永远等不到消息，
+    hub 继续把它当在线并在 `agents[0]` 上派任务 —— 请求烤满 15s 超时，
+    而真正的 daemon 侧连 task_started 都没有。
+    """
+
+    def test_idle_connection_is_dropped(self, client, monkeypatch) -> None:
+        from skillos.api import main as api_main
+
+        monkeypatch.setattr(api_main, "WS_AGENT_IDLE_TIMEOUT_S", 0.3)
+        token = _token(client)
+        with client.websocket_connect("/ws/agent") as ws:
+            ws.send_json({"type": "hello", "agent_id": "idle-agent",
+                          "token": _agent_token(client, token)})
+            ws.receive_json()  # welcome：握手完成，之后一句都不发
+            # 等空闲判死后的关闭帧（期间可能有其它下行帧，跳过）
+            code = None
+            deadline = time.time() + 3
+            while time.time() < deadline:
+                msg = ws.receive()
+                if msg["type"] == "websocket.close":
+                    code = msg.get("code")
+                    break
+            assert code == 4004
+        # 关键：不仅要断开，还要从 hub 摘除，否则任务照样派给死连接
+        assert client.app.state.hub.agents == {}
 
 
 class TestDaemonRetryClassification:

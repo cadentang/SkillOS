@@ -58,6 +58,13 @@ from skillos.store.db import init_schema, make_engine, make_session_factory
 
 log = get_logger("skillos.api")
 
+# agent 连接的空闲判死阈值（秒）。daemon 每 HEARTBEAT_S=20s 发一次 ping，
+# 90s ≈ 4.5 个周期，正常链路绝不会误杀。
+# 为什么必须服务端自己判：daemon 被强杀（关窗口 / Stop-Process）时 TCP 半开，
+# 只靠 uvicorn 的 WS ping 可能拖很久；这段时间 hub 仍认为它在线，任务发给死连接
+# → 调用方烤满超时（实测 /api/logs 502 TIMEOUT，而 daemon 侧根本没收到请求）。
+WS_AGENT_IDLE_TIMEOUT_S = float(os.environ.get("SKILLOS_WS_IDLE_TIMEOUT_S") or 90.0)
+
 
 def _harden_secret_file(path) -> None:
     """POSIX 下收紧权限到 0600；Windows 家目录本身按用户 ACL 隔离。"""
@@ -367,7 +374,21 @@ def create_app(db_url: str | None = None, jwt_secret: str | None = None,
             asyncio.create_task(_sync_custom_on_connect())
             try:
                 while True:
-                    msg = await _recv_json(ws, timeout=None)
+                    try:
+                        msg = await _recv_json(ws, timeout=WS_AGENT_IDLE_TIMEOUT_S)
+                    except TimeoutError:
+                        # 空闲判死：进程被强杀后的半开连接必须由服务端摘掉，
+                        # 否则 hub 继续往它上面派任务（浪费到超时才失败）。
+                        log.warning(
+                            "ws_agent_idle_timeout",
+                            agent_id=conn.agent_id, user_id=conn.user_id,
+                            idle_s=WS_AGENT_IDLE_TIMEOUT_S,
+                        )
+                        try:
+                            await ws.close(code=4004, reason="IDLE_TIMEOUT")
+                        except Exception:  # noqa: BLE001 —— 关已断的连接不算错误
+                            pass
+                        break
                     mtype = msg.get("type")
                     if mtype == "ping":
                         await ws.send_json({"type": "pong"})

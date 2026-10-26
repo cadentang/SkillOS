@@ -180,7 +180,8 @@ class WsHub:
             async with self._lock:
                 self.pending.pop(request_id, None)
             return agent, {"ok": False,
-                           "error": {"code": "TIMEOUT", "message": "daemon 未在时限内响应"}}
+                           "error": {"code": "TIMEOUT",
+                                     "message": f"daemon 未在 {timeout:g}s 内回包"}}
 
     # ---------------------------------------------------------------- UI 通道
 

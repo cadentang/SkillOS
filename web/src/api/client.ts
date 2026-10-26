@@ -34,6 +34,20 @@ interface Envelope<T> {
   error: { code: string; message: string; held_back_removals?: string[] } | null;
 }
 
+/** FastAPI 用 HTTPException 抛出的错误体是 `{detail: string | {code,message}}`，
+ *  不走 `{ok,error}` 信封。不兜这一支，前端只能拿到 statusText ——
+ *  实测日志面板把「daemon 未回包」显示成 "502 Bad Gateway"，无法判断原因。 */
+function fromDetail(detail: unknown): { code: string; message: string } | null {
+  if (typeof detail === "string" && detail) return { code: detail, message: detail };
+  if (detail && typeof detail === "object") {
+    const d = detail as { code?: unknown; message?: unknown };
+    const code = typeof d.code === "string" ? d.code : null;
+    const message = typeof d.message === "string" ? d.message : null;
+    if (code || message) return { code: code ?? "INTERNAL", message: message ?? "" };
+  }
+  return null;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -50,11 +64,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       tokenStore.clear();
       if (window.location.pathname !== "/login") window.location.href = "/login";
     }
+    const fallback = fromDetail((body as unknown as { detail?: unknown }).detail);
     throw new ApiError(
-      body.error?.code ?? "INTERNAL",
-      body.error?.message ?? res.statusText,
+      body.error?.code ?? fallback?.code ?? "INTERNAL",
+      body.error?.message || fallback?.message || res.statusText,
       res.status,
-      body.error,
+      body.error ?? fallback,
     );
   }
   return body.data as T;

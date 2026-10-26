@@ -17,8 +17,21 @@
  */
 
 import { useQuery } from "@tanstack/react-query";
+import { ApiError } from "../api/client";
 import { endpoints, type LogEvent } from "../api/endpoints";
 import { useDaemonStatusCtx } from "../ws/DaemonStatusContext";
+
+/** 读日志失败的可读文案。
+ *
+ * `TIMEOUT` 与离线是两件事（见文件头）：daemon 明明连着、只是没在时限内回包，
+ * 混成一句「记录读取失败」会让人误判成网络/断连。 */
+function logsErrText(err: unknown): string {
+  if (err instanceof ApiError) {
+    if (err.code === "TIMEOUT") return "daemon 未回包（超时）· 稍后重试";
+    return `日志读取失败（${err.code}）· 稍后重试`;
+  }
+  return "记录读取失败 · 稍后重试";
+}
 
 type RowKind = "ok" | "warning" | "danger" | "tertiary";
 
@@ -133,7 +146,7 @@ export default function RecentSync() {
             {!daemon.connected
               ? "daemon 离线 · 暂无记录"
               : logs.isError
-                ? "记录读取失败 · 稍后重试"
+                ? logsErrText(logs.error)
                 : "暂无最近同步记录"}
           </div>
         ) : (

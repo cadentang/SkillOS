@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { ApiError } from "../api/client";
 import { endpoints, type LogEvent } from "../api/endpoints";
 import { useDaemonStatusCtx } from "../ws/DaemonStatusContext";
 
@@ -80,15 +81,24 @@ export default function LogsPanel({ defaultTail = 200 }: Props) {
       >
         {offline
           ? "daemon 离线 · 日志暂不可查（503 DAEMON_OFFLINE）"
-          : isMissing
-            ? `${mode}.log 尚未创建（首次运行后才有）`
-            : `5s 轮询 · 显示最近 ${events.length} 条`}
+          : logsQuery.isError
+            ? logsQuery.error instanceof ApiError &&
+              logsQuery.error.code === "TIMEOUT"
+              ? "daemon 未回包（超时）· 稍后重试"
+              : `日志读取失败${
+                  logsQuery.error instanceof ApiError
+                    ? `（${logsQuery.error.code}）`
+                    : ""
+                } · 稍后重试`
+            : isMissing
+              ? `${mode}.log 尚未创建（首次运行后才有）`
+              : `5s 轮询 · 显示最近 ${events.length} 条`}
       </p>
       <ul
         className="mt-sm flex flex-col gap-xs overflow-auto"
         style={{ maxHeight: 360 }}
       >
-        {events.length === 0 && !offline && !isMissing && (
+        {events.length === 0 && !offline && !isMissing && !logsQuery.isError && (
           <li style={{ color: "var(--text-secondary)" }}>暂无匹配日志</li>
         )}
         {events
